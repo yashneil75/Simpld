@@ -93,7 +93,7 @@ function createWindow(port) {
     // native strip blends into the pane instead of reading as a separate bar.
     titleBarStyle: 'hidden',
     ...(process.platform === 'win32'
-      ? { titleBarOverlay: { color: '#232323', symbolColor: '#c9c9c6', height: 40 } }
+      ? { titleBarOverlay: { color: 'transparent', symbolColor: '#c9c9c6', height: 40 } }
       : {}),
     backgroundColor: '#232323',
     icon: path.join(__dirname, '..', 'Logo.png'),
