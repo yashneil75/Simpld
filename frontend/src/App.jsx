@@ -105,6 +105,10 @@ export default function App() {
 
   useEffect(() => {
     if (!window.electron) return;
+    // macOS paints native traffic lights on the left; reserve room for them.
+    if (window.electron.platform === 'darwin') {
+      document.documentElement.style.setProperty('--tl', '78px');
+    }
     const off1 = window.electron.onUpdateAvailable?.((v) => { setUpdateAvailable(true); setUpdateVersion(v || ''); });
     const off2 = window.electron.onUpdateDownloaded?.((v) => { setUpdateDownloaded(true); setUpdateVersion(v || ''); });
     const off3 = window.electron.onUpdateProgress?.((v) => setUpdateProgress(v || 0));

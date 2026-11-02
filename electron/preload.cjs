@@ -14,6 +14,7 @@ const backendPort = backendPortFromArgv();
 
 contextBridge.exposeInMainWorld('electron', {
   backendPort,
+  platform: process.platform,
   getBackendPort: () => ipcRenderer.invoke('backend:port'),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),

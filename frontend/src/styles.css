@@ -39,6 +39,7 @@
   --hover: rgba(255, 255, 255, 0.06);
   --selected: rgba(255, 255, 255, 0.11);
   --wco: 140px;              /* native caption-button overlay reserve */
+  --tl: 8px;                 /* macOS traffic-light reserve (overridden at runtime) */
   --bar-h: 40px;             /* one shared title-bar height everywhere */
   --railed: 46rem;
 }
@@ -322,6 +323,8 @@ button.foot-status:hover { background: var(--hover); color: var(--ink); }
   padding: 0 8px 0 8px;
   /* Reserve the slice where Windows paints the native caption buttons. */
   padding-right: var(--wco);
+  /* Reserve space on the left for macOS traffic lights. */
+  padding-left: var(--tl);
 }
 
 .project { position: relative; }
