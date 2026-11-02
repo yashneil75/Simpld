@@ -114,7 +114,7 @@ export async function streamChat(content, { onToken, signal } = {}) {
 }
 
 // Electron bridge (preload.cjs). In a plain browser these are no-ops except
-// openFolder, which falls back to a manual prompt.
+// openFolder, which falls back to a native folder picker.
 export const desktop = {
   isElectron: !!window.electron,
   minimize: () => window.electron?.minimize(),
@@ -123,7 +123,30 @@ export const desktop = {
   onMaximized: (cb) => window.electron?.onMaximized(cb),
   openFolder: async () => {
     if (window.electron?.openFolder) return window.electron.openFolder();
-    const path = window.prompt('Project folder path:');
-    return path || null;
+    // Browser fallback: a real, native folder-browse dialog via
+    // <input webkitdirectory>. Browsers only expose the picked folder's name
+    // (never absolute paths), which is all the backend needs to register the
+    // project and group chats under it.
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.webkitdirectory = true;
+      input.style.display = 'none';
+      const cleanup = () => input.remove();
+      input.addEventListener('change', () => {
+        cleanup();
+        const file = input.files && input.files[0];
+        if (!file) return resolve(null); // dialog dismissed
+        // webkitRelativePath is "FolderName/sub/file..." — first segment wins.
+        const name = file.webkitRelativePath.split(/[\\/]/)[0] || file.name;
+        resolve(name);
+      });
+      input.addEventListener('cancel', () => {
+        cleanup();
+        resolve(null);
+      });
+      document.body.appendChild(input);
+      input.click();
+    });
   },
 };

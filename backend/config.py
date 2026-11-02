@@ -43,7 +43,7 @@ MODELS = {
         "performance": "Fastest for general work",
         "arch": "Ling 3.0 tiny",
         "quant": "Q4_K_M",
-        "description": "100K ctx • 8GB VRAM or 12GB RAM • Fastest for general work",
+        "description": "Fastest for general work",
     },
     "medium": {
         "repo": "ConwayResearch/Underdog-Saluki-27B-1.0",
@@ -59,7 +59,7 @@ MODELS = {
         "performance": "Strong performance for demanding tasks",
         "arch": "Underdog Saluki 27B",
         "quant": "IQ2 mix",
-        "description": "100K ctx • 12GB VRAM or 16GB RAM • Strong performance for demanding tasks",
+        "description": "Strong performance for demanding tasks",
     },
     "pro": {
         "repo": "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
@@ -75,7 +75,7 @@ MODELS = {
         "performance": "Highest performance for the most demanding tasks",
         "arch": "Qwen 3.8 27B",
         "quant": "IQ3_S",
-        "description": "200K ctx • At least 16GB VRAM or 20GB RAM • Highest performance for the most demanding tasks",
+        "description": "Highest performance for the most demanding tasks",
     },
 }
 

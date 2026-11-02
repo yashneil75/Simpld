@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api.js';
-import { capitalize } from './icons.jsx';
+import { api, desktop } from '../api.js';
+import { capitalize, BACK } from './icons.jsx';
 
 function fmtSize(bytes) {
   if (bytes == null) return 'unknown';
@@ -23,8 +23,8 @@ function compat(model, system) {
   return 'Insufficient memory';
 }
 
-export default function SettingsPage({ onClose, confirm, onUsed, confirmDelete, onToggleConfirmDelete, updateAvailable, updateDownloaded, updateVersion, updateProgress }) {
-  const [tab, setTab] = useState('General');
+export default function SettingsPage({ initialTab, onClose, confirm, onUsed, confirmDelete, onToggleConfirmDelete, updateAvailable, updateDownloaded, updateVersion, updateProgress }) {
+  const [tab, setTab] = useState(initialTab || 'General');
   const [lib, setLib] = useState(null);
   const [progress, setProgress] = useState({});
   const [busy, setBusy] = useState(null);
@@ -79,11 +79,25 @@ export default function SettingsPage({ onClose, confirm, onUsed, confirmDelete, 
   }
 
   return (
-    <div className="settings-page">
+    <div className="pane">
+      {/* Own title bar strip so the settings view keeps the native drag area
+          and Windows' overlay controls align exactly like the chat view. */}
+      <div className="bar settings-bar">
+        <button type="button" className="bar-link" onClick={onClose}>
+          {BACK}
+          <span>Settings</span>
+        </button>
+        <div className={`bar-drag${desktop.isElectron ? ' draggable' : ''}`} />
+      </div>
+      <div className="settings-page">
       <div className="settings-page-head">
         <div>
-          <h2>Model Settings</h2>
-          <div className="settings-sub">Choose, download and manage local models.</div>
+          <h2>{tab === 'Models' ? 'Models' : 'General'}</h2>
+          <div className="settings-sub">
+            {tab === 'Models'
+              ? 'Choose, download and manage local models.'
+              : 'App behaviour and updates.'}
+          </div>
         </div>
       </div>
       <div className="settings-tabs">
@@ -224,6 +238,7 @@ export default function SettingsPage({ onClose, confirm, onUsed, confirmDelete, 
             </div>
           </div>
         )}
+      </div>
       </div>
     </div>
   );

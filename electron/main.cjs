@@ -86,8 +86,16 @@ function createWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    frame: false, // custom title bar in React (TopBar.jsx)
-    backgroundColor: '#1c1c1c',
+    // Hidden title bar with native caption buttons: the web page keeps drawing
+    // its own header (TopBar/SettingsPage), -webkit-app-region strips give the
+    // native drag, and Windows paints the system minimize/maximize/close
+    // buttons in the header's top-right. The overlay color matches --bg so the
+    // native strip blends into the pane instead of reading as a separate bar.
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'win32'
+      ? { titleBarOverlay: { color: '#232323', symbolColor: '#c9c9c6', height: 40 } }
+      : {}),
+    backgroundColor: '#232323',
     icon: path.join(__dirname, '..', 'Logo.png'),
     show: false, // show when ready, no white flash
     webPreferences: {

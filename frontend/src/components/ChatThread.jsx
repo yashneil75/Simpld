@@ -1,31 +1,70 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-function splitThinking(content) {
-  const closeIdx = content.indexOf('</think>');
+// Reasoning markers vary by model family. Support the common variants so a
+// reply is split correctly regardless of which one the model emits.
+const OPEN_MARKERS = [
+  '<' + 'think' + '>',
+  '<' + 'think' + 'ing>',
+  '<' + 'thinking' + '>',
+];
+const CLOSE_MARKERS = [
+  '<' + '/' + 'think' + '>',
+  '<' + '/' + 'think' + 'ing>',
+  '<' + '/' + 'thinking' + '>',
+];
+
+function findEarliest(text, markers) {
+  let best = -1;
+  let marker = null;
+  for (const m of markers) {
+    const idx = text.indexOf(m);
+    if (idx !== -1 && (best === -1 || idx < best)) {
+      best = idx;
+      marker = m;
+    }
+  }
+  return { idx: best, marker };
+}
+
+function stripOpens(text) {
+  let out = text;
+  for (const m of OPEN_MARKERS) out = out.split(m).join('');
+  return out;
+}
+
+function splitThinking(content, isStreaming = false) {
+  const { idx: closeIdx, marker: closeMarker } = findEarliest(content, CLOSE_MARKERS);
   if (closeIdx !== -1) {
-    // Models may emit only the closing tag; treat everything before it as
-    // reasoning (dropping a leading <think> if present).
-    const thinking = content.slice(0, closeIdx).replace(/<think>/g, '').trim();
-    const answer = content.slice(closeIdx + '</think>'.length).trim();
+    const thinking = stripOpens(content.slice(0, closeIdx)).trim();
+    const answer = content.slice(closeIdx + closeMarker.length).trim();
     return { thinking, answer, done: true };
   }
-  const openIdx = content.indexOf('<think>');
+  const { idx: openIdx, marker: openMarker } = findEarliest(content, OPEN_MARKERS);
   if (openIdx !== -1) {
-    const thinking = content.slice(openIdx + '<think>'.length).trim();
+    const thinking = content.slice(openIdx + openMarker.length).trim();
     const answer = content.slice(0, openIdx).trim();
     return { thinking, answer, done: false };
   }
-  return { thinking: '', answer: content.trim(), done: false };
+  // No markers yet. While tokens are still arriving, assume the text is
+  // reasoning straight from the start; a finished reply without markers is a
+  // plain answer.
+  if (isStreaming && content) return { thinking: content.trim(), answer: '', done: false };
+  return { thinking: '', answer: content.trim(), done: true };
 }
 
 function Spinner() {
   return <span className="spinner" aria-label="Thinking" />;
 }
 
+function TokPerSec({ tokPerSec }) {
+  return <span className="tokps">{(tokPerSec || 0).toFixed(1)} tok/s</span>;
+}
+
 function Message({ role, content, streaming, tokPerSec }) {
   const copyBtn = useRef(null);
+  const [showThinking, setShowThinking] = useState(false);
 
   const copy = async () => {
     try {
@@ -47,25 +86,32 @@ function Message({ role, content, streaming, tokPerSec }) {
     );
   }
 
-  const { thinking, answer, done } = splitThinking(content);
-  const showSpinner = streaming;
+  const { thinking, answer, done } = splitThinking(content, streaming);
+  const isThinking = streaming && !done;
 
   return (
     <div className={`msg ${role}${streaming ? ' streaming' : ''}`}>
       {thinking && (
-        <details className="thinking" open>
-          <summary>
-            Thinking
-            {showSpinner && !done && <Spinner />}
-          </summary>
-          <div className="thinking-box">{thinking}</div>
-        </details>
+        <div className="thinking-block">
+          <button
+            type="button"
+            className="thinking-toggle"
+            aria-expanded={String(showThinking)}
+            onClick={() => setShowThinking((v) => !v)}
+          >
+            <span>{showThinking ? 'Hide thinking' : 'Show thinking'}</span>
+            {isThinking && <Spinner />}
+            {isThinking && <TokPerSec tokPerSec={tokPerSec} />}
+          </button>
+          {/* Reasoning renders unboxed and grayed out, like a margin note. */}
+          {showThinking && <div className="thinking-text">{thinking}</div>}
+        </div>
       )}
       {answer && <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>}
-      {showSpinner && (
+      {streaming && (!thinking || answer) && (
         <div className="stream-spinner">
           <Spinner />
-          <span className="tokps">{(tokPerSec || 0).toFixed(1)} tok/s</span>
+          <TokPerSec tokPerSec={tokPerSec} />
         </div>
       )}
       {!streaming && content && (
@@ -118,7 +164,9 @@ export default function ChatThread({ messages, streamingText, tokPerSec }) {
       {visible.map((m, i) => (
         <Message key={i} role={m.role} content={m.content} tokPerSec={tokPerSec} />
       ))}
-      {streamingText !== null && <Message role="assistant" content={streamingText} streaming tokPerSec={tokPerSec} />}
+      {streamingText !== null && (
+        <Message role="assistant" content={streamingText} streaming tokPerSec={tokPerSec} />
+      )}
     </main>
   );
 }

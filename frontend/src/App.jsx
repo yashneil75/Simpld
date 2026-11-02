@@ -29,6 +29,7 @@ export default function App() {
   const [projectOpen, setProjectOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('General');
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState(null);
@@ -320,6 +321,11 @@ export default function App() {
     api.setSetting('confirm_delete', value).catch((err) => console.error(err));
   }, []);
 
+  const openSettings = useCallback((tab = 'General') => {
+    setSettingsTab(tab);
+    setSettingsOpen(true);
+  }, []);
+
   const projectName =
     projects.find((p) => p.path === currentProject)?.name ?? currentProject;
   const isHero = messages.length === 0 && streamingText === null;
@@ -335,24 +341,27 @@ export default function App() {
         onNew={newChat}
         onOpen={openChat}
         onDelete={deleteChat}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openSettings('General')}
+        onBrowse={browseForFolder}
         updateAvailable={updateAvailable}
+        updateDownloaded={updateDownloaded}
+        updateVersion={updateVersion}
+        updateProgress={updateProgress}
       />
 
       {settingsOpen ? (
-        <div className="pane">
-          <SettingsPage
-            onClose={() => setSettingsOpen(false)}
-            confirm={confirm}
-            onUsed={handleUsed}
-            confirmDelete={confirmDelete}
-            onToggleConfirmDelete={toggleConfirmDelete}
-            updateAvailable={updateAvailable}
-            updateDownloaded={updateDownloaded}
-            updateVersion={updateVersion}
-            updateProgress={updateProgress}
-          />
-        </div>
+        <SettingsPage
+          initialTab={settingsTab}
+          onClose={() => setSettingsOpen(false)}
+          confirm={confirm}
+          onUsed={handleUsed}
+          confirmDelete={confirmDelete}
+          onToggleConfirmDelete={toggleConfirmDelete}
+          updateAvailable={updateAvailable}
+          updateDownloaded={updateDownloaded}
+          updateVersion={updateVersion}
+          updateProgress={updateProgress}
+        />
       ) : (
       <div className={`pane${isHero ? ' is-hero' : ''}`}>
         <TopBar

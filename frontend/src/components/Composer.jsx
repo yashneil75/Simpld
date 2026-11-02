@@ -19,7 +19,7 @@ export default function Composer({ value, onChange, onSend, streaming, onStop })
         onSend(value.trim());
       }}
     >
-      <button type="button" aria-label="Attach" title="Attach (coming soon)">
+      <button type="button" className="attach" aria-label="Attach" title="Attach (coming soon)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>

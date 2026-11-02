@@ -39,13 +39,6 @@ export default function ProjectMenu({
           )}
         </div>
       ))}
-      <div className="menu-separator" />
-      <button type="button" className="menu-option" onClick={onBrowse}>
-        <span className="opt-text">
-          <span className="opt-name">Add a new workspace…</span>
-        </span>
-        {FOLDER}
-      </button>
     </div>
   );
 }
