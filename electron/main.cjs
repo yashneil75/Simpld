@@ -122,6 +122,25 @@ function createWindow(port) {
 
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:maximized', true));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false));
+
+  // Zoom shortcuts: Electron has no default menu/accelerators, so Ctrl/Cmd
+  // +/-/0 do nothing unless we handle them here. Also covers the numpad.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (!(input.control || input.meta)) return;
+    const wc = mainWindow.webContents;
+    const key = input.key;
+    if (key === '=' || key === '+' || key === 'Add') {
+      wc.setZoomFactor(Math.min(3, Math.round((wc.getZoomFactor() + 0.1) * 10) / 10));
+      event.preventDefault();
+    } else if (key === '-' || key === 'Subtract') {
+      wc.setZoomFactor(Math.max(0.25, Math.round((wc.getZoomFactor() - 0.1) * 10) / 10));
+      event.preventDefault();
+    } else if (key === '0' || key === 'NumPad0') {
+      wc.setZoomFactor(1.0);
+      event.preventDefault();
+    }
+  });
 }
 
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());
