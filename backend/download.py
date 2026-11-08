@@ -94,8 +94,9 @@ def remote_size(name: str) -> int | None:
         return _remote_cache[name]
     spec = config.MODELS[name]
     try:
-        meta = get_hf_file_metadata(spec["repo"], spec["file"])
-        _remote_cache[name] = meta.size
+        _remote_cache[name] = get_hf_file_metadata(
+            hf_hub_url(spec["repo"], spec["file"])
+        ).size
     except Exception:
         preset = spec.get("size_gb")
         _remote_cache[name] = int(preset * 1e9) if preset is not None else None
