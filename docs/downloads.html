@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Download Simpld, a free, offline AI chat app that runs entirely on your own GPU. Builds for Windows, macOS and Linux." />
+  <meta name="theme-color" content="#F7F9FC" />
+  <title>Simpld: Downloads</title>
+  <link rel="icon" type="image/png" href="assets/logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;700;800&display=swap" rel="stylesheet" />
+  <style>
+    /* Same world as the landing page: paper ground, sky-blue field,
+       ink navy text, hard edges, no radius. Rows inherit the spec-sheet
+       language instead of the old black poster. */
+    :root {
+      --paper: #F7F9FC;
+      --cloud: #F6F9FC;
+      --sky: #2E5FC8;
+      --sky-deep: #24499B;
+      --ink: #132A4A;
+      --ink-soft: #46608A;
+      --rule: #D5DEEC;
+      --display: "Hanken Grotesk", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: var(--paper); }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 17px/1.6 var(--display);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    ::selection { background: var(--sky); color: var(--cloud); }
+
+    a { color: inherit; }
+
+    :focus-visible {
+      outline: 3px solid var(--sky);
+      outline-offset: 3px;
+    }
+
+    .stage {
+      max-width: 56rem;
+      margin: 0 auto;
+      padding: 0 clamp(20px, 4vw, 48px) 3rem;
+    }
+
+    /* ---------- nav ---------- */
+    .nav {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-top: 26px;
+    }
+
+    .wordmark {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+      text-decoration: none;
+      color: var(--ink);
+    }
+
+    .wordmark .mark {
+      width: 1.3rem;
+      height: 1.3rem;
+      flex: none;
+      transform: translateY(1px);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: clamp(16px, 3vw, 32px);
+      font-weight: 500;
+      font-size: 0.95rem;
+    }
+
+    .nav-links a {
+      text-decoration: none;
+      border-bottom: 2px solid transparent;
+      padding-bottom: 2px;
+      transition: border-color .12s ease;
+    }
+
+    .nav-links a:hover,
+    .nav-links a:focus-visible { border-bottom-color: var(--ink); }
+
+    /* ---------- head ---------- */
+    .head {
+      padding: clamp(3.5rem, 9vh, 6rem) 0 0;
+    }
+
+    .head h1 {
+      margin: 0;
+      font-size: clamp(2.6rem, 7vw, 4.4rem);
+      font-weight: 800;
+      line-height: 1.02;
+      letter-spacing: -0.03em;
+    }
+
+    .head .sub {
+      margin: 1.3rem 0 0;
+      max-width: 34rem;
+      font-size: 1.08rem;
+      color: var(--ink-soft);
+    }
+
+    /* ---------- groups and rows ---------- */
+    .groups { margin-top: 3.2rem; }
+
+    .group + .group { margin-top: 2.8rem; }
+
+    .group h2 {
+      margin: 0 0 10px;
+      font-size: 1.3rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+    }
+
+    .rows { border-top: 2px solid var(--ink); }
+
+    .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px 24px;
+      padding: 16px 10px;
+      border-bottom: 1px solid var(--rule);
+      text-decoration: none;
+      transition: background .12s ease;
+    }
+
+    .row:hover,
+    .row:focus-visible { background: rgba(46, 95, 200, .07); }
+
+    .row-name {
+      font-weight: 800;
+      font-size: 1.18rem;
+      letter-spacing: -0.01em;
+    }
+
+    .row-desc {
+      grid-column: 1;
+      font-size: 14px;
+      color: var(--ink-soft);
+    }
+
+    .row-get {
+      grid-row: 1 / span 2;
+      grid-column: 2;
+      font-weight: 700;
+      font-size: 0.98rem;
+      padding: 11px 24px;
+      background: var(--ink);
+      color: var(--cloud);
+      text-align: center;
+      transition: background .12s ease;
+    }
+
+    .row:hover .row-get,
+    .row:focus-visible .row-get { background: var(--sky); }
+
+    /* ---------- fine print ---------- */
+    .fineprint {
+      margin-top: 2.8rem;
+      padding-top: 14px;
+      border-top: 1px solid var(--rule);
+      font-size: 14px;
+      color: var(--ink-soft);
+    }
+
+    .fineprint strong { color: var(--ink); }
+
+    .fineprint p { margin: 6px 0; }
+
+    /* ---------- footer ---------- */
+    footer {
+      max-width: 56rem;
+      margin: 0 auto;
+      padding: 2rem clamp(20px, 4vw, 48px) 2.8rem;
+      border-top: 1px solid var(--rule);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 36px;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 0.92rem;
+      color: var(--ink-soft);
+    }
+
+    footer .sign {
+      margin: 0;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    footer nav { display: flex; gap: 22px; }
+
+    footer a {
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      text-decoration-color: rgba(70, 96, 138, .45);
+    }
+
+    footer a:hover,
+    footer a:focus-visible { color: var(--ink); }
+
+    @media (max-width: 560px) {
+      .row { grid-template-columns: 1fr; }
+      .row-get {
+        grid-row: auto;
+        grid-column: 1;
+        justify-self: start;
+        padding: 10px 20px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .row, .row-get, .nav-links a { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="stage">
+    <header class="nav">
+      <a class="wordmark" href="./index.html"><img class="mark" src="assets/logo.png" alt="" width="21" height="21" /> Simpld</a>
+      <nav class="nav-links" aria-label="Site">
+        <a href="https://github.com/yashneil75/Simpld">GitHub</a>
+      </nav>
+    </header>
+
+    <header class="head">
+      <h1>Downloads</h1>
+      <p class="sub">Every build below is free forever and runs entirely on your machine.</p>
+    </header>
+
+    <section class="groups" aria-label="Downloads by platform">
+      <div class="group">
+        <h2>Windows</h2>
+        <div class="rows">
+          <a class="row" href="https://github.com/yashneil75/Simpld/releases/latest/download/Simpld-windows-cuda.exe">
+            <span class="row-name">Windows (CUDA)</span>
+            <span class="row-get">Download</span>
+            <span class="row-desc">NVIDIA GPUs. The fastest path, every shader lit.</span>
+          </a>
+          <a class="row" href="https://github.com/yashneil75/Simpld/releases/latest/download/Simpld-windows-vulkan.exe">
+            <span class="row-name">Windows (Vulkan)</span>
+            <span class="row-get">Download</span>
+            <span class="row-desc">AMD and Intel GPUs too. If it has drivers, it runs.</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>macOS</h2>
+        <div class="rows">
+          <a class="row" href="https://github.com/yashneil75/Simpld/releases/latest/download/Simpld-macos-metal.dmg">
+            <span class="row-name">macOS (Metal)</span>
+            <span class="row-get">Download</span>
+            <span class="row-desc">Apple Silicon only, Intel Macs not supported yet.</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Linux</h2>
+        <div class="rows">
+          <a class="row" href="https://github.com/yashneil75/Simpld/releases/latest/download/Simpld-linux-cuda.AppImage">
+            <span class="row-name">Linux (CUDA)</span>
+            <span class="row-get">Download</span>
+            <span class="row-desc">NVIDIA rigs, the enthusiast's choice since forever.</span>
+          </a>
+          <a class="row" href="https://github.com/yashneil75/Simpld/releases/latest/download/Simpld-linux-vulkan.AppImage">
+            <span class="row-name">Linux (Vulkan)</span>
+            <span class="row-get">Download</span>
+            <span class="row-desc">Anything else that can push triangles.</span>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <aside class="fineprint">
+      <p><strong>Windows:</strong> SmartScreen may warn on first launch. Click "More info", then "Run anyway".</p>
+      <p><strong>macOS:</strong> Right-click the app and choose "Open" the first time you run it.</p>
+      <p><strong>Model weights are not bundled.</strong> The app starts with a mock model; download weights once per machine from inside the app, then restart.</p>
+    </aside>
+  </main>
+
+  <footer>
+    <p class="sign"><img class="mark" src="assets/logo.png" alt="" width="15" height="15" style="vertical-align:-2px" /> Simpld — yours, offline, always</p>
+    <nav aria-label="Footer">
+      <a href="./index.html">Home</a>
+      <a href="https://github.com/yashneil75/Simpld/releases">Browse all releases</a>
+    </nav>
+  </footer>
+</body>
+</html>

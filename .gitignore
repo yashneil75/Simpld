@@ -7,3 +7,4 @@ build-backend/
 release/
 *.db
 simpld-backend.spec
+.impeccable
