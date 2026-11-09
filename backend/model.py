@@ -6,11 +6,37 @@ selected tier via llama_cpp and stream chat completions token by token.
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import threading
+from datetime import datetime
 from typing import Iterator
 
 from backend import config
 from backend import download as download_mod
+
+# llama.cpp init lines worth surfacing for KV debugging: the llama_kv_cache
+# lines record which cache types were *actually* applied, so a requested q4_0
+# that the backend can't honour (flash attention missing, ISWA mixed cache,
+# etc.) shows up here as a "(f16)" fallback.
+_KV_LOG_MATCH = ("kv_cache", "iswa", "flash_attn", "quantiz", "fallback", "atten")
+
+
+def _dump_kv_debug(model_name: str, logs: list[str]) -> None:
+    """Echo KV-relevant llama.cpp init lines to stderr and a log file."""
+    picked = [line.rstrip() for line in logs if any(m in line for m in _KV_LOG_MATCH)]
+    if not picked:
+        return
+    for line in picked:
+        print(f"[kv-debug] {model_name}: {line}", file=sys.stderr, flush=True)
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(config.MODEL_DIR / "kv_debug.log", "a", encoding="utf-8") as f:
+            f.write(f"\n=== {stamp} model {model_name} ===\n")
+            for line in picked:
+                f.write(line + "\n")
+    except OSError:
+        pass  # log file is best-effort; stderr already got the lines
 
 
 def spec_for(id: str) -> dict:
@@ -39,7 +65,7 @@ class Model:
     def start(self) -> None:
         if self._llm is not None:
             return
-        from llama_cpp import Llama
+        from llama_cpp import Llama, llama_cpp
 
         path = download_mod.resolve(self.name)
         if path is None:
@@ -47,16 +73,35 @@ class Model:
                 path = download_mod.download(self.name)
             else:
                 raise RuntimeError(f"Model file for {self.name!r} is not on disk")
-        kv_quant = self.spec["kv_quant"]
-        self._llm = Llama(
-            model_path=str(path),
-            n_ctx=self.spec["ctx"],
-            n_gpu_layers=-1,
-            flash_attn=self.spec["flash_attn"],
-            type_k=kv_quant,
-            type_v=kv_quant,
-            verbose=False,
+
+        # Capture llama.cpp's init logs only while the context is built, then
+        # restore whatever callback llama-cpp-python had installed.
+        logs: list[str] = []
+        capture_cb = llama_cpp.llama_log_callback(
+            lambda _level, text, _user: logs.append(text.decode("utf-8", "replace"))
         )
+        prev_cb = llama_cpp.llama_log_callback()
+        prev_data = ctypes.c_void_p()
+        llama_cpp.llama_log_get(ctypes.byref(prev_cb), ctypes.byref(prev_data))
+        llama_cpp.llama_log_set(capture_cb, None)
+        try:
+            kv_quant = self.spec["kv_quant"]
+            # swa_full=False: llama.h's C default is True, which makes ISWA
+            # models (e.g. Gemma 4) allocate their sliding-window cache for the
+            # full context instead of just the window (~16x more KV memory).
+            self._llm = Llama(
+                model_path=str(path),
+                n_ctx=self.spec["ctx"],
+                n_gpu_layers=-1,
+                flash_attn=self.spec["flash_attn"],
+                type_k=kv_quant,
+                type_v=kv_quant,
+                swa_full=False,
+                verbose=False,
+            )
+        finally:
+            llama_cpp.llama_log_set(prev_cb, prev_data)
+            _dump_kv_debug(self.name, logs)
 
     def stop(self) -> None:
         if self._llm is None:
