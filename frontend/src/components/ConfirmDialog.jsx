@@ -7,7 +7,8 @@ export default function ConfirmDialog({ ask, onResolve }) {
   useEffect(() => {
     if (ask) {
       if (never.current) never.current.checked = false;
-      ref.current?.showModal();
+      ref.current.returnValue = '';
+      if (!ref.current.open) ref.current.showModal();
     } else {
       ref.current?.close();
     }
@@ -17,15 +18,19 @@ export default function ConfirmDialog({ ask, onResolve }) {
     <dialog
       ref={ref}
       className="ask"
+      aria-labelledby="confirm-title"
+      aria-describedby="confirm-body"
       onClose={() => onResolve(ref.current?.returnValue === 'delete', never.current?.checked)}
     >
       <form method="dialog">
-        <h2>{ask?.title}</h2>
-        <p>{ask?.body}</p>
-        <label className="ask-opt">
-          <input ref={never} type="checkbox" />
-          Never show me this again
-        </label>
+        <h2 id="confirm-title">{ask?.title}</h2>
+        <p id="confirm-body">{ask?.text}</p>
+        {ask?.allowOptOut && (
+          <label className="ask-opt">
+            <input ref={never} type="checkbox" />
+            Never show me this again
+          </label>
+        )}
         <div className="ask-actions">
           <button type="submit" value="cancel" autoFocus>
             Cancel

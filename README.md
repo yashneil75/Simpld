@@ -21,43 +21,48 @@ Simpld-Desktop/
 npm run dist
 ```
 
-That does three steps: `frontend:build` (React → `frontend/dist/`),
-`backend:build` (PyInstaller freezes Python → `dist-backend/simpld-backend/`),
-then electron-builder packages both into `release/`:
+This builds the frontend, freezes the Python backend, downloads the Unsloth
+llama.cpp build b12588-mix-c0c3de8, and packages the app into `release/`.
 
 - `Simpld-0.1.0-setup.exe` — installer (Start Menu shortcut, uninstaller)
 - `Simpld-0.1.0-portable.exe` — single file, runs anywhere
 
-Double-click either: one Simpld window opens, the frozen backend starts
-silently beside it and is killed on quit. Single-instance: launching again
-just focuses the existing window.
+Double-click either to open Simpld. The frozen backend and llama.cpp
+runtime stop when the app quits. Launching again focuses the existing window.
 
-Model weights are NOT bundled (they are GBs). On first run the app uses the
-mock model; download weights once per machine and restart:
+The installer includes the llama.cpp runtime. Open **Settings → Models** to
+download **Kintsugi 27B** (UD-IQ3_XXS, 11.66 GB). You can also run this command.
 
 ```
-python -m backend.download lite
+python -m backend.download Kintsugi-27b
 ```
 
-Weights and chats live in `%USERPROFILE%\.simpld`, shared by dev and
-packaged runs.
+Simpld uses an 8,192-token context for text chat. Weights and chats live in
+`%USERPROFILE%\.simpld` on Windows and `~/.simpld` on macOS and Linux. Existing
+model files remain on disk when you upgrade.
 
 ## Dev
 
-`npm run dev` opens the Electron window: it starts the
-Python backend, the Vite server, then Electron pointed at Vite. The
-`frontend:dev` script alone is the only thing that serves localhost for
-plain-browser debugging.
+Install the Python dependencies with `python -m pip install -r backend/requirements.txt`.
+Run `npm ci` and `npm --prefix frontend ci` to install the Node dependencies,
+then run `npm run dev` to open Electron. Electron starts its Python sidecar. For inference in development,
+put a Kintsugi 27B compatible `llama-server` (Unsloth b12588-mix-c0c3de8 build,
+which supports the Inkling 2 looped-layer layout) on `PATH` or set
+`SIMPLD_LLAMA_SERVER` to the executable path.
+
+For browser-only development, run `npm run backend` and
+`npm run frontend:dev` in separate terminals.
 
 ## API
 
 - `GET /api/health`, `GET /api/models`, `POST /api/models/select`
 - `GET /api/projects`, `POST /api/projects/open`, `POST /api/projects/delete`
-- `GET /api/history`, `GET /api/conversations`, `POST /api/conversations/new`
+- `GET /api/session`, `GET /api/history`, `GET /api/conversations`, `POST /api/conversations/new`
 - `POST /api/conversations/{id}/open`, `DELETE /api/conversations/{id}`
 - `GET /api/settings`, `PUT /api/settings/{key}`
 - `POST /api/chat` (full JSON reply), `POST /api/chat/stream` (SSE tokens + `[DONE]`)
 
-Folder picking lives in Electron (`dialog:open-folder`); the Python
-`browse()` from the pywebview days is gone. Window controls go through the
-preload bridge (`window.electron`), and the drag region uses `-webkit-app-region`.
+Electron provides the folder picker and update controls. The title bar uses
+native window controls and a draggable header.
+
+# TODO migrate to Atlassian Design System

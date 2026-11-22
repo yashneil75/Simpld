@@ -7,15 +7,15 @@
   "main": "electron/main.cjs",
   "scripts": {
     "backend": "python -m backend.app",
-    "backend:mock": "set SIMPLD_MOCK=1&& python -m backend.app",
-    "backend:build": "pyinstaller --noconfirm --clean --name simpld-backend --onedir --console --distpath dist-backend --workpath build-backend --hidden-import requests --collect-all llama_cpp --collect-all llama_cpp_python --exclude-module torch --exclude-module torchvision --exclude-module torchaudio --exclude-module torchdata --exclude-module torchao --exclude-module triton --exclude-module bitsandbytes --exclude-module pygame --exclude-module django --exclude-module langchain --exclude-module langchain_classic --exclude-module langchain_community --exclude-module langchain_core --exclude-module transformers --exclude-module diffusers --exclude-module accelerate --exclude-module sklearn --exclude-module scipy --exclude-module pandas --exclude-module matplotlib --exclude-module nltk --exclude-module librosa --exclude-module datasets --exclude-module playwright --exclude-module onnxruntime --exclude-module numba --exclude-module llvmlite --exclude-module pyarrow --exclude-module duckdb --exclude-module lxml --exclude-module pdfminer --exclude-module pypdfium2 --exclude-module imageio --exclude-module sqlalchemy --exclude-module psycopg2 --exclude-module grpc --exclude-module sentry_sdk --exclude-module gevent --exclude-module tkinter --exclude-module cv2 backend_main.py",
+    "backend:build": "pyinstaller --noconfirm --clean --name simpld-backend --onedir --console --distpath dist-backend --workpath build-backend --exclude-module torch --exclude-module torchvision --exclude-module torchaudio --exclude-module torchdata --exclude-module torchao --exclude-module triton --exclude-module bitsandbytes --exclude-module pygame --exclude-module django --exclude-module langchain --exclude-module langchain_classic --exclude-module langchain_community --exclude-module langchain_core --exclude-module transformers --exclude-module diffusers --exclude-module accelerate --exclude-module sklearn --exclude-module scipy --exclude-module pandas --exclude-module matplotlib --exclude-module nltk --exclude-module librosa --exclude-module datasets --exclude-module playwright --exclude-module onnxruntime --exclude-module numba --exclude-module llvmlite --exclude-module pyarrow --exclude-module duckdb --exclude-module lxml --exclude-module pdfminer --exclude-module pypdfium2 --exclude-module imageio --exclude-module sqlalchemy --exclude-module psycopg2 --exclude-module grpc --exclude-module sentry_sdk --exclude-module gevent --exclude-module tkinter --exclude-module cv2 backend_main.py",
     "frontend:install": "npm --prefix frontend install",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
     "electron:dev": "electron electron/main.cjs",
-    "dev": "concurrently -k -n BACKEND,FRONTEND,ELECTRON -c blue,green,magenta \"npm run backend\" \"npm run frontend:dev\" \"wait-on http://localhost:5173 http://127.0.0.1:8000/api/health && npm run electron:dev\"",
+    "dev": "concurrently -k -n FRONTEND,ELECTRON -c green,magenta \"npm run frontend:dev\" \"wait-on http://localhost:5173 && npm run electron:dev\"",
     "build": "npm run frontend:build",
-    "dist": "npm run frontend:build && npm run backend:build && electron-builder",
+    "runtime:bundle": "node scripts/bundle-runtime.mjs",
+    "dist": "npm run frontend:build && npm run backend:build && npm run runtime:bundle && electron-builder",
     "dist:app": "npm run frontend:build && electron-builder"
   },
   "devDependencies": {

@@ -5,7 +5,7 @@
 // VITE_BACKEND_URL.
 function baseUrl() {
   if (typeof window !== 'undefined') {
-    const port = window.electron?.backendPort || window.__BACKEND_PORT;
+    const port = window.electron?.backendPort;
     if (port) return `http://127.0.0.1:${port}`;
   }
   return (import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
@@ -13,46 +13,47 @@ function baseUrl() {
 
 const url = (path) => `${baseUrl()}${path}`;
 
+function jsonHeaders() {
+  const token = window.electron?.backendToken;
+  return { 'Content-Type': 'application/json', ...(token ? { 'X-Simpld-Token': token } : {}) };
+}
+
+async function responseError(response) {
+  const body = await response.json().catch(() => null);
+  return new Error(typeof body?.detail === 'string' ? body.detail : `Request failed (${response.status}).`);
+}
+
 async function req(path, options = {}) {
   const res = await fetch(url(path), {
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     ...options,
   });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`${options.method || 'GET'} ${path} failed (${res.status}): ${detail}`);
-  }
+  if (!res.ok) throw await responseError(res);
   if (res.status === 204) return null;
   return res.json();
 }
 
 export const api = {
-  health: () => req('/api/health'),
-  models: () => req('/api/models'),
+  models: (signal) => req('/api/models', { signal }),
   selectModel: (name) =>
     req('/api/models/select', { method: 'POST', body: JSON.stringify({ name }) }),
-  projects: () => req('/api/projects'),
   openProject: (path) =>
     req('/api/projects/open', { method: 'POST', body: JSON.stringify({ path }) }),
   deleteProject: (path) =>
     req('/api/projects/delete', { method: 'POST', body: JSON.stringify({ path }) }),
-  history: () => req('/api/history'),
-  conversations: () => req('/api/conversations'),
+  session: (signal, settled = false) => req(settled ? '/api/session?settled=true' : '/api/session', { signal }),
   newChat: () => req('/api/conversations/new', { method: 'POST' }),
   openChat: (id) => req(`/api/conversations/${id}/open`, { method: 'POST' }),
   deleteChat: (id) => req(`/api/conversations/${id}`, { method: 'DELETE' }),
-  settings: () => req('/api/settings'),
+  settings: (signal) => req('/api/settings', { signal }),
   setSetting: (key, value) =>
     req(`/api/settings/${key}`, { method: 'PUT', body: JSON.stringify({ value }) }),
-  chat: (content) =>
-    req('/api/chat', { method: 'POST', body: JSON.stringify({ content }) }),
-  library: () => req('/api/models/library'),
-  system: () => req('/api/system'),
+  library: (signal) => req('/api/models/library', { signal }),
+  system: (signal) => req('/api/system', { signal }),
   startDownload: (id) =>
     req('/api/models/download', { method: 'POST', body: JSON.stringify({ name: id }) }),
   cancelDownload: (id) =>
     req('/api/models/download/cancel', { method: 'POST', body: JSON.stringify({ name: id }) }),
-  downloadProgress: () => req('/api/models/download/progress'),
   deleteModel: (id) =>
     req(`/api/models/library/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   loadModel: () => req('/api/models/load', { method: 'POST' }),
@@ -62,65 +63,57 @@ export const api = {
  * POST to /api/chat/stream and invoke onToken for each SSE token.
  * Returns the full assembled reply. Abort via AbortController signal.
  */
-export async function streamChat(content, { onToken, signal } = {}) {
+export async function streamChat(content, { onToken, signal, revision } = {}) {
   const res = await fetch(url('/api/chat/stream'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ content }),
+    headers: { ...jsonHeaders(), Accept: 'text/event-stream' },
+    body: JSON.stringify({ content, revision }),
     signal,
   });
-  if (!res.ok) throw new Error(`stream failed (${res.status})`);
-  if (!res.body) throw new Error('streaming not supported in this browser');
+  if (!res.ok) throw await responseError(res);
+  if (!res.body) throw new Error('Streaming is unavailable.');
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buf = '';
+  let buffer = '';
   let full = '';
 
   const handleLine = (line) => {
-    const text = line.trim();
-    if (!text.startsWith('data:')) return false;
-    const payload = text.slice(5).trim();
+    if (!line.startsWith('data:')) return false;
+    const payload = line.slice(5).trim();
     if (payload === '[DONE]') return true;
-    try {
-      const data = JSON.parse(payload);
-      if (data.token) {
-        full += data.token;
-        onToken?.(data.token, full);
-      } else if (data.error) {
-        throw new Error(data.error);
-      }
-    } catch (err) {
-      if (err.message && !err.message.startsWith('{')) throw err;
-      // ignore malformed keep-alive lines
+    const { token, error } = JSON.parse(payload);
+    if (error) throw new Error(error);
+    if (token) {
+      full += token;
+      onToken?.(token, full);
     }
     return false;
   };
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      if (handleLine(line)) return full;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (handleLine(line)) return full;
+      }
+      if (done) {
+        if (handleLine(buffer)) return full;
+        throw new Error('The response ended before it finished.');
+      }
     }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
-  // trailing fragment
-  if (buf.trim() && handleLine(buf)) return full;
-  return full;
 }
 
-// Electron bridge (preload.cjs). In a plain browser these are no-ops except
-// openFolder, which falls back to a native folder picker.
+// Use Electron's folder dialog in the desktop app.
 export const desktop = {
   isElectron: !!window.electron,
-  minimize: () => window.electron?.minimize(),
-  toggleMaximize: () => window.electron?.toggleMaximize(),
-  close: () => window.electron?.close(),
-  onMaximized: (cb) => window.electron?.onMaximized(cb),
   openFolder: async () => {
     if (window.electron?.openFolder) return window.electron.openFolder();
     // Browser fallback: a real, native folder-browse dialog via

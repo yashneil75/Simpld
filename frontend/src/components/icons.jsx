@@ -48,14 +48,3 @@ export const BACK = (
     <path d="m12 19-7-7 7-7" />
   </svg>
 );
-
-export function capitalize(s) {
-  return s ? s[0].toUpperCase() + s.slice(1) : s;
-}
-
-// Tier ids print capitalized ("medium" -> "Medium"); local-file ids print
-// as-is without the "file:" prefix.
-export function modelLabel(id) {
-  if (!id) return id;
-  return id.startsWith('file:') ? id.slice(5) : capitalize(id);
-}

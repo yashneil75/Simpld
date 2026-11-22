@@ -4,42 +4,24 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Passed by main.cjs via webPreferences.additionalArguments. Synchronous, so
 // the file:// renderer knows the backend port before its first fetch.
-function backendPortFromArgv() {
-  const arg = (process.argv || []).find((a) => a.startsWith('--backend-port='));
-  const port = arg ? Number(arg.split('=')[1]) : NaN;
-  return Number.isFinite(port) && port > 0 ? port : null;
+function getArgument(name) {
+  const prefix = `--${name}=`;
+  return process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
 }
 
-const backendPort = backendPortFromArgv();
+const port = Number(getArgument('backend-port'));
 
 contextBridge.exposeInMainWorld('electron', {
-  backendPort,
+  backendPort: Number.isInteger(port) && port > 0 ? port : null,
+  backendToken: getArgument('backend-token'),
   platform: process.platform,
-  getBackendPort: () => ipcRenderer.invoke('backend:port'),
-  minimize: () => ipcRenderer.invoke('window:minimize'),
-  toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
-  close: () => ipcRenderer.invoke('window:close'),
   openFolder: () => ipcRenderer.invoke('dialog:open-folder'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
-  onUpdateAvailable: (cb) => {
-    const listener = (_e, v) => cb(v);
-    ipcRenderer.on('update:available', listener);
-    return () => ipcRenderer.removeListener('update:available', listener);
-  },
-  onUpdateDownloaded: (cb) => {
-    const listener = (_e, v) => cb(v);
-    ipcRenderer.on('update:downloaded', listener);
-    return () => ipcRenderer.removeListener('update:downloaded', listener);
-  },
-  onUpdateProgress: (cb) => {
-    const listener = (_e, v) => cb(v);
-    ipcRenderer.on('update:progress', listener);
-    return () => ipcRenderer.removeListener('update:progress', listener);
-  },
-  onMaximized: (cb) => {
-    const listener = (_event, value) => cb(value);
-    ipcRenderer.on('window:maximized', listener);
-    return () => ipcRenderer.removeListener('window:maximized', listener);
+  getUpdateStatus: () => ipcRenderer.invoke('update:status'),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('update:status', listener);
+    return () => ipcRenderer.removeListener('update:status', listener);
   },
 });

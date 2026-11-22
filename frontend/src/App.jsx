@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import TopBar from './components/TopBar.jsx';
 import ProjectMenu from './components/ProjectMenu.jsx';
@@ -7,433 +7,347 @@ import ChatThread from './components/ChatThread.jsx';
 import Composer from './components/Composer.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
-import { modelLabel } from './components/icons.jsx';
 import { api, desktop, streamChat } from './api.js';
 
+const idle = { phase: 'idle' };
+
+function replyReducer(state, event) {
+  switch (event.type) {
+    case 'start':
+      return state.phase === 'idle' ? { phase: 'streaming', text: '', rate: 0 } : state;
+    case 'token':
+      return state.phase === 'streaming' ? { ...state, text: event.text, rate: event.rate } : state;
+    case 'stop':
+      return state.phase === 'streaming' ? { ...state, phase: 'stopping' } : state;
+    case 'finish':
+      return idle;
+    default:
+      return state;
+  }
+}
+
+const emptySession = {
+  revision: null, messages: [], chats: [], currentChat: null,
+  projects: [], currentProject: '', workspace: '',
+};
+
 export default function App() {
-  const [messages, setMessages] = useState([]);
-  const [chats, setChats] = useState([]);
-  const [currentChat, setCurrentChat] = useState(null);
-  const [projects, setProjects] = useState([]);
-  const [currentProject, setCurrentProject] = useState('');
-  const [workspace, setWorkspace] = useState('');
-  const [tiers, setTiers] = useState([]);
-  const [model, setModel] = useState('');
-  const [modelMock, setModelMock] = useState(false);
+  const [session, setSession] = useState(emptySession);
+  const [startup, setStartup] = useState('connecting');
+  const [catalog, setCatalog] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(true);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [updateDownloaded, setUpdateDownloaded] = useState(false);
-  const [updateVersion, setUpdateVersion] = useState('');
-  const [updateProgress, setUpdateProgress] = useState(0);
+  const [update, setUpdate] = useState({ phase: 'idle' });
   const [ask, setAsk] = useState(null);
-  const [projectOpen, setProjectOpen] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState('General');
+  const [menu, setMenu] = useState(null);
+  const [settingsTab, setSettingsTab] = useState(null);
   const [input, setInput] = useState('');
-  const [streaming, setStreaming] = useState(false);
-  const [streamingText, setStreamingText] = useState(null);
-  const [tokPerSec, setTokPerSec] = useState(0);
+  const [reply, dispatchReply] = useReducer(replyReducer, idle);
+  const [navigating, setNavigating] = useState(false);
   const [error, setError] = useState('');
-  const abort = useRef(null);
+  const stream = useRef(null);
+  const navigation = useRef(null);
   const askResolve = useRef(null);
-  const partialRef = useRef('');
-  const streamStartRef = useRef(0);
-  const tokenCountRef = useRef(0);
 
-  const closeMenus = useCallback(() => {
-    setProjectOpen(false);
-    setModelOpen(false);
-  }, []);
-
-  const refreshNav = useCallback(async () => {
-    try {
-      const [proj, conv] = await Promise.all([api.projects(), api.conversations()]);
-      setProjects(proj.projects);
-      setCurrentProject(proj.current);
-      setWorkspace(proj.workspace);
-      setChats(conv.chats);
-      setCurrentChat(conv.current);
-    } catch (err) {
-      console.error('Could not refresh nav:', err);
-    }
-  }, []);
-
-  const loadHistory = useCallback(async () => {
-    try {
-      const data = await api.history();
-      setMessages(data.messages);
-    } catch (err) {
-      console.error('Could not load history:', err);
-    }
-  }, []);
-
-  // Wait for the backend (Electron may still be spawning Python).
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Resolve the backend port (Electron exposes it synchronously via
-      // preload, but fall back to the async IPC channel just in case).
-      if (typeof window !== 'undefined' && window.electron && !window.electron.backendPort && typeof window.electron.getBackendPort === 'function') {
+    const controller = new AbortController();
+    async function connect() {
+      for (let attempt = 0; attempt < 60 && !controller.signal.aborted; attempt += 1) {
         try {
-          const p = await window.electron.getBackendPort();
-          if (p) window.__BACKEND_PORT = p;
-        } catch {}
-      }
-      for (let i = 0; i < 60 && !cancelled; i++) {
-        try {
-          await api.health();
-          const [settings, models] = await Promise.all([api.settings(), api.models()]);
-          if (cancelled) return;
+          const [settings, models, snapshot] = await Promise.all([
+            api.settings(controller.signal), api.models(controller.signal), api.session(controller.signal),
+          ]);
+          if (controller.signal.aborted) return;
           setConfirmDelete(settings.confirm_delete);
-          setTiers(models.tiers);
-          setModel(models.current);
-          setModelMock(models.mock);
-          await loadHistory();
-          await refreshNav();
+          setCatalog(models);
+          setSession(snapshot);
+          setStartup('ready');
           return;
         } catch {
-          await new Promise((r) => setTimeout(r, 500));
+          if (!controller.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }
-      if (!cancelled) setError('Could not reach the Python backend on /api. Is it running?');
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadHistory, refreshNav]);
+      if (!controller.signal.aborted) {
+        setStartup('failed');
+        setError('Could not reach the Python backend. Restart Simpld to retry.');
+      }
+    }
+    connect();
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (!window.electron) return;
-    // macOS paints native traffic lights on the left; reserve room for them.
     if (window.electron.platform === 'darwin') {
       document.documentElement.style.setProperty('--tl', '78px');
     }
-    const off1 = window.electron.onUpdateAvailable?.((v) => { setUpdateAvailable(true); setUpdateVersion(v || ''); });
-    const off2 = window.electron.onUpdateDownloaded?.((v) => { setUpdateDownloaded(true); setUpdateVersion(v || ''); });
-    const off3 = window.electron.onUpdateProgress?.((v) => setUpdateProgress(v || 0));
-    return () => { off1?.(); off2?.(); off3?.(); };
+    let live = true;
+    let receivedEvent = false;
+    const unsubscribe = window.electron.onUpdateStatus((status) => {
+      receivedEvent = true;
+      setUpdate(status);
+    });
+    window.electron.getUpdateStatus().then((status) => {
+      if (live && !receivedEvent) setUpdate(status);
+    }).catch(console.error);
+    return () => {
+      live = false;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        closeMenus();
-        setSettingsOpen(false);
-      }
+    const onKey = (event) => {
+      if (event.key !== 'Escape') return;
+      setMenu(null);
+      if (!ask) setSettingsTab(null);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [closeMenus]);
+  }, [ask]);
 
-  const stopStream = useCallback(() => {
-    abort.current?.abort();
-  }, []);
+  useEffect(() => () => stream.current?.abort(), []);
 
-  const send = useCallback(
-    async (text) => {
-      setError('');
-      setMessages((m) => [...m, { role: 'user', content: text }]);
-      setInput('');
-      setStreaming(true);
-      setStreamingText('');
-      setTokPerSec(0);
-      partialRef.current = '';
-      streamStartRef.current = Date.now();
-      tokenCountRef.current = 0;
-      refreshNav(); // a brand-new chat (or title) shows up in the sidebar
+  const stopStream = () => {
+    if (!stream.current) return;
+    dispatchReply({ type: 'stop' });
+    stream.current.abort();
+  };
 
-      const controller = new AbortController();
-      abort.current = controller;
-      let full = '';
-      let cancelled = false;
-      try {
-        full = await streamChat(text, {
-          signal: controller.signal,
-          onToken: (_tok, assembled) => {
-            tokenCountRef.current += 1;
-            partialRef.current = assembled;
-            setStreamingText(assembled);
-            const elapsed = (Date.now() - streamStartRef.current) / 1000;
-            if (elapsed > 0) setTokPerSec(tokenCountRef.current / elapsed);
-          },
-        });
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          cancelled = true;
-        } else {
-          console.error('Chat failed:', err);
-          setError(String(err.message || err));
-        }
-      } finally {
-        abort.current = null;
-        setStreaming(false);
-        if (cancelled && partialRef.current) {
-          // Keep the partial result in the thread instead of discarding it.
-          setMessages((m) => [...m, { role: 'assistant', content: partialRef.current }]);
-        }
-        setStreamingText(null);
-        setTokPerSec(0);
-        // The backend persisted both messages; re-read for the canonical state.
-        if (!cancelled) await loadHistory();
-        await refreshNav();
-      }
-      return full;
-    },
-    [loadHistory, refreshNav],
-  );
+  async function send(text) {
+    if (stream.current || navigation.current || startup !== 'ready') return;
+    const controller = new AbortController();
+    stream.current = controller;
+    const started = performance.now();
+    let tokens = 0;
+    let partial = '';
+    let failure;
+    const prompt = { role: 'user', content: text };
 
-  const newChat = useCallback(async () => {
-    stopStream();
-    setSettingsOpen(false);
-    setMessages([]);
+    setError('');
+    setSession((current) => ({ ...current, messages: [...current.messages, prompt] }));
     setInput('');
+    dispatchReply({ type: 'start' });
+
     try {
-      await api.newChat();
+      await streamChat(text, {
+        revision: session.revision,
+        signal: controller.signal,
+        onToken: (_token, assembled) => {
+          if (stream.current !== controller) return;
+          partial = assembled;
+          tokens += 1;
+          dispatchReply({
+            type: 'token', text: partial,
+            rate: tokens / Math.max((performance.now() - started) / 1000, 0.001),
+          });
+        },
+      });
     } catch (err) {
-      console.error('new_chat failed:', err);
+      if (err.name !== 'AbortError') failure = err.message;
     }
-    await refreshNav();
-  }, [refreshNav, stopStream]);
 
-  const openChat = useCallback(
-    async (id) => {
-      stopStream();
-      setSettingsOpen(false);
+    if (stream.current !== controller) return;
+    try {
+      const snapshot = await api.session(undefined, controller.signal.aborted);
+      if (stream.current !== controller) return;
+      setSession(snapshot);
+      if (failure && snapshot.revision === session.revision && snapshot.messages.length === session.messages.length) {
+        setInput((draft) => draft || text);
+      }
+    } catch (err) {
+      if (stream.current !== controller) return;
+      if (partial) {
+        setSession((current) => ({
+          ...current, messages: [...current.messages, { role: 'assistant', content: partial }],
+        }));
+      }
+      failure ||= err.message;
+    } finally {
+      if (stream.current === controller) {
+        stream.current = null;
+        if (failure) setError(failure);
+        dispatchReply({ type: 'finish' });
+      }
+    }
+  }
+
+  function navigate(action, { clearDraft = true } = {}) {
+    if (startup !== 'ready') return;
+    if (stream.current) {
+      stream.current.abort();
+      stream.current = null;
+      dispatchReply({ type: 'finish' });
+    }
+    setNavigating(true);
+    setMenu(null);
+    setError('');
+    const next = (navigation.current ?? Promise.resolve()).then(async () => {
       try {
-        await api.openChat(id);
+        await action();
+        if (clearDraft) setInput('');
+        setSession(await api.session());
       } catch (err) {
-        console.error('open_chat failed:', err);
+        setError(err.message);
+      } finally {
+        if (navigation.current === next) {
+          navigation.current = null;
+          setNavigating(false);
+        }
       }
-      await loadHistory();
-      await refreshNav();
-    },
-    [loadHistory, refreshNav, stopStream],
-  );
+    });
+    navigation.current = next;
+    return next;
+  }
 
-  const confirm = useCallback(
-    (title, body) =>
-      new Promise((resolve) => {
-        if (!confirmDelete) return resolve(true);
-        askResolve.current = resolve;
-        setAsk({ title, body });
-      }),
-    [confirmDelete],
-  );
+  function confirm(title, text, allowOptOut = true) {
+    if (allowOptOut && !confirmDelete) return Promise.resolve(true);
+    if (askResolve.current) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      askResolve.current = resolve;
+      setAsk({ title, text, allowOptOut });
+    });
+  }
 
-  const resolveAsk = useCallback(
-    (ok, never) => {
-      setAsk(null);
-      if (ok && never) {
-        setConfirmDelete(false);
-        api.setSetting('confirm_delete', false).catch((err) => console.error(err));
-      }
-      askResolve.current?.(ok);
-      askResolve.current = null;
-    },
-    [],
-  );
+  async function saveConfirmDelete(value) {
+    try {
+      await api.setSetting('confirm_delete', value);
+      setConfirmDelete(value);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
-  const deleteChat = useCallback(
-    async (id, title, isCurrent) => {
-      if (!(await confirm('Delete this chat?', `"${title}" and its messages will be deleted permanently.`)))
-        return;
-      stopStream();
-      try {
-        await api.deleteChat(id);
-      } catch (err) {
-        console.error('delete_chat failed:', err);
-      }
-      if (isCurrent) await loadHistory();
-      await refreshNav();
-    },
-    [confirm, loadHistory, refreshNav, stopStream],
-  );
+  function resolveAsk(ok, never) {
+    const resolve = askResolve.current;
+    askResolve.current = null;
+    setAsk(null);
+    if (ok && never) saveConfirmDelete(false);
+    resolve?.(ok);
+  }
 
-  const openProject = useCallback(
-    async (path) => {
-      stopStream();
-      setProjectOpen(false);
-      try {
-        await api.openProject(path);
-      } catch (err) {
-        console.error('open_project failed:', err);
-      }
-      await loadHistory();
-      await refreshNav();
-    },
-    [loadHistory, refreshNav, stopStream],
-  );
-
-  const browseForFolder = useCallback(async () => {
-    setProjectOpen(false);
-    stopStream();
+  async function browseForFolder() {
+    setMenu(null);
     try {
       const path = await desktop.openFolder();
-      if (!path) return; // dialog dismissed
-      await api.openProject(path);
-      await loadHistory();
-      await refreshNav();
+      if (path) navigate(() => api.openProject(path));
     } catch (err) {
-      console.error('Could not open the folder picker:', err);
+      setError(err.message);
     }
-  }, [loadHistory, refreshNav, stopStream]);
+  }
 
-  const deleteProject = useCallback(
-    async (path, name) => {
-      if (
-        !(await confirm(
-          'Delete this project?',
-          `"${name}" and its chats will be deleted permanently. The folder itself is left on disk.`,
-        ))
-      )
-        return;
-      stopStream();
-      try {
-        await api.deleteProject(path);
-      } catch (err) {
-        console.error('delete_project failed:', err);
-      }
-      await loadHistory();
-      await refreshNav();
-    },
-    [confirm, loadHistory, refreshNav, stopStream],
-  );
+  async function deleteChat(id, title) {
+    if (await confirm('Delete this chat?', `"${title}" and its messages will be deleted permanently.`)) {
+      navigate(() => api.deleteChat(id), { clearDraft: id === session.currentChat });
+    }
+  }
 
-  const selectModel = useCallback(async (name) => {
-    setModelOpen(false);
-    setModel(name);
+  async function deleteProject(path, name) {
+    if (await confirm('Delete this project?', `"${name}" and its chats will be deleted permanently. The folder itself is left on disk.`)) {
+      navigate(() => api.deleteProject(path), { clearDraft: path === session.currentProject });
+    }
+  }
+
+  async function selectModel(name) {
+    setMenu(null);
+    if (name === catalog?.current) return;
     try {
-      const status = await api.selectModel(name);
-      setModel(status.current ?? name);
-      setModelMock(status.mock ?? false);
+      setCatalog(await api.selectModel(name));
     } catch (err) {
-      console.error('Could not switch model:', err);
+      setError(err.message);
     }
-  }, []);
+  }
 
-  // Called by the settings popup after switching; keeps the composer badge honest.
-  const handleUsed = useCallback((status) => {
-    setModel(status.current ?? '');
-    setModelMock(status.mock ?? false);
-  }, []);
-
-  const toggleConfirmDelete = useCallback((next) => {
-    // next = true means "don't ask"
-    const value = !next;
-    setConfirmDelete(value);
-    api.setSetting('confirm_delete', value).catch((err) => console.error(err));
-  }, []);
-
-  const openSettings = useCallback((tab = 'General') => {
-    setSettingsTab(tab);
-    setSettingsOpen(true);
-  }, []);
-
-  const projectName =
-    projects.find((p) => p.path === currentProject)?.name ?? currentProject;
-  const isHero = messages.length === 0 && streamingText === null;
+  const { messages, chats, currentChat, projects, currentProject, workspace } = session;
+  const model = catalog?.tiers.find((item) => item.name === catalog.current);
+  const projectName = projects.find((project) => project.path === currentProject)?.name ?? currentProject;
+  const isHero = messages.length === 0 && reply.phase === 'idle';
+  const projectOpen = menu === 'project';
+  const modelOpen = menu === 'model';
 
   return (
-    <div className="app" onClick={(e) => {
-      if (!e.target.closest('.model') && !e.target.closest('.project')) closeMenus();
+    <div className="app" onClick={(event) => {
+      if (!event.target.closest('.model, .project')) setMenu(null);
     }}>
       <Sidebar
         chats={chats}
         current={currentChat}
         projectList={projects}
-        onNew={newChat}
-        onOpen={openChat}
+        onNew={() => { setSettingsTab(null); navigate(api.newChat); }}
+        onOpen={(id) => { setSettingsTab(null); navigate(() => api.openChat(id)); }}
         onDelete={deleteChat}
-        onOpenSettings={() => openSettings('General')}
+        onOpenSettings={() => setSettingsTab('General')}
         onBrowse={browseForFolder}
-        updateAvailable={updateAvailable}
-        updateDownloaded={updateDownloaded}
-        updateVersion={updateVersion}
-        updateProgress={updateProgress}
+        update={update}
       />
 
-      {settingsOpen ? (
+      {settingsTab ? (
         <SettingsPage
-          initialTab={settingsTab}
-          onClose={() => setSettingsOpen(false)}
+          tab={settingsTab}
+          onTabChange={setSettingsTab}
+          onClose={() => setSettingsTab(null)}
           confirm={confirm}
-          onUsed={handleUsed}
+          onUsed={setCatalog}
           confirmDelete={confirmDelete}
-          onToggleConfirmDelete={toggleConfirmDelete}
-          updateAvailable={updateAvailable}
-          updateDownloaded={updateDownloaded}
-          updateVersion={updateVersion}
-          updateProgress={updateProgress}
+          onToggleConfirmDelete={saveConfirmDelete}
+          update={update}
+          error={error}
         />
       ) : (
-      <div className={`pane${isHero ? ' is-hero' : ''}`}>
-        <TopBar
-          projectName={projectName}
-          projectPath={currentProject}
-          menuOpen={projectOpen}
-          onToggleMenu={() => {
-            setModelOpen(false);
-            setProjectOpen((v) => !v);
-          }}
-          onCloseMenus={closeMenus}
-          menu={
-            <ProjectMenu
-              open={projectOpen}
-              projects={projects}
-              current={currentProject}
-              workspace={workspace}
-              onOpen={openProject}
-              onBrowse={browseForFolder}
-              onDelete={deleteProject}
-            />
-          }
-        />
-
-        {!isHero && <ChatThread messages={messages} streamingText={streamingText} tokPerSec={tokPerSec} />}
-        {error && (
-          <div className="dock" style={{ paddingBottom: 0 }}>
-            <div className="error-bubble">{error}</div>
-          </div>
-        )}
-
-        <div className="dock">
-          <h1 className="hero">What next?</h1>
-          <Composer
-            value={input}
-            onChange={setInput}
-            onSend={send}
-            streaming={streaming}
-            onStop={stopStream}
+        <div className={`pane${isHero ? ' is-hero' : ''}`}>
+          <TopBar
+            projectName={projectName}
+            projectPath={currentProject}
+            menuOpen={projectOpen}
+            onToggleMenu={() => setMenu(projectOpen ? null : 'project')}
+            menu={
+              <ProjectMenu
+                open={projectOpen}
+                projects={projects}
+                current={currentProject}
+                workspace={workspace}
+                onOpen={(path) => navigate(() => api.openProject(path))}
+                onDelete={deleteProject}
+              />
+            }
           />
-          <div className="meta">
-            {modelMock && (
-              <span className="mock-badge" title="Model weights are not downloaded; replies are canned placeholders">
-                mock model
-              </span>
-            )}
-            <div className="model">
-              <button
-                type="button"
-                className="model-trigger"
-                aria-haspopup="menu"
-                aria-expanded={modelOpen}
-                hidden={!model}
-                onClick={() => {
-                  setProjectOpen(false);
-                  setModelOpen((v) => !v);
-                }}
-              >
-                <span>{modelLabel(model)}</span>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="m6 9 6 6 6-6" />
-                </svg>
-              </button>
-              <ModelMenu open={modelOpen} tiers={tiers} current={model} onSelect={selectModel} />
+          {!isHero && <ChatThread key={session.revision} messages={messages} streamingText={reply.text ?? null} tokPerSec={reply.rate ?? 0} />}
+          {error && (
+            <div className="dock" style={{ paddingBottom: 0 }}>
+              <div className="error-bubble" role="alert">{error}</div>
+            </div>
+          )}
+
+          <div className="dock">
+            <h1 className="hero">What next?</h1>
+            <Composer
+              value={input}
+              onChange={setInput}
+              onSend={send}
+              phase={reply.phase}
+              disabled={startup !== 'ready' || navigating}
+              onStop={stopStream}
+            />
+            <div className="meta">
+              {model && (
+                <div className="model">
+                  <button
+                    type="button"
+                    className="model-trigger"
+                    aria-haspopup="menu"
+                    aria-expanded={modelOpen}
+                    onClick={() => setMenu(modelOpen ? null : 'model')}
+                  >
+                    <span>{model.label}</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </button>
+                  <ModelMenu open={modelOpen} tiers={catalog.tiers} current={model.name} onSelect={selectModel} />
+                </div>
+              )}
             </div>
           </div>
         </div>
-      </div>
       )}
 
       <ConfirmDialog ask={ask} onResolve={resolveAsk} />

@@ -29,7 +29,7 @@ The public site is the download + introduction surface for GitHub-hosted release
 ## Capabilities and Constraints
 
 - Backend accelerations: CUDA, Vulkan, Metal (explicitly supported combos per platform; macOS = Apple Silicon only for now, Intel Macs not supported)
-- Mock model is the on-disk default until real weights are downloaded and the app restarts
+- Kintsugi 27B is available from Settings → Models. Simpld can load the weights as soon as the download finishes.
 - Licensing: free forever, open source
 - The site is plain static HTML/CSS with no build step and no dependencies; keep it that way
 - `about.html` was removed at user request (2026-11-07); no page may link to it

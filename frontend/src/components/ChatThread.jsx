@@ -47,10 +47,11 @@ function splitThinking(content, isStreaming = false) {
     const answer = content.slice(0, openIdx).trim();
     return { thinking, answer, done: false };
   }
-  // No markers yet. While tokens are still arriving, assume the text is
-  // reasoning straight from the start; a finished reply without markers is a
-  // plain answer.
-  if (isStreaming && content) return { thinking: content.trim(), answer: '', done: false };
+  // A marker can arrive across several streamed chunks.
+  const text = content.trim();
+  if (isStreaming && OPEN_MARKERS.some((marker) => marker.startsWith(text))) {
+    return { thinking: '', answer: '', done: false };
+  }
   return { thinking: '', answer: content.trim(), done: true };
 }
 
@@ -107,7 +108,11 @@ function Message({ role, content, streaming, tokPerSec }) {
           {showThinking && <div className="thinking-text">{thinking}</div>}
         </div>
       )}
-      {answer && <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>}
+      {answer && (
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+        }}>{answer}</ReactMarkdown>
+      )}
       {streaming && (!thinking || answer) && (
         <div className="stream-spinner">
           <Spinner />
@@ -142,6 +147,10 @@ export default function ChatThread({ messages, streamingText, tokPerSec }) {
   };
 
   useEffect(() => {
+    stickToBottom.current = true;
+  }, [messages.length]);
+
+  useEffect(() => {
     const el = ref.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [messages, streamingText]);
@@ -149,11 +158,6 @@ export default function ChatThread({ messages, streamingText, tokPerSec }) {
   const onScroll = () => {
     stickToBottom.current = isNearBottom();
   };
-
-  // A new message (sent or loaded) should re-engage auto-follow.
-  useEffect(() => {
-    stickToBottom.current = true;
-  }, [messages.length]);
 
   const visible = messages.filter(
     ({ role, content }) => (role === 'user' || role === 'assistant') && content,

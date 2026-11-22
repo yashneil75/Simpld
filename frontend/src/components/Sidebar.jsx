@@ -14,10 +14,7 @@ export default function Sidebar({
   onDelete,
   onOpenSettings,
   onBrowse,
-  updateAvailable,
-  updateDownloaded,
-  updateVersion,
-  updateProgress,
+  update,
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -125,24 +122,16 @@ export default function Sidebar({
         {q && order.length === 0 && <div className="side-empty">No matching sessions</div>}
       </nav>
 
-      {/* Footer only exists when there is a status to show — an empty bar with
-          its separator reads as a stray divider at the bottom of the rail. */}
-      {((updateProgress > 0 && updateProgress < 100) || updateDownloaded || updateAvailable) && (
+      {['available', 'downloading', 'ready'].includes(update.phase) && (
         <div className="sidebar-foot">
-          {updateProgress > 0 && updateProgress < 100 && (
+          {update.phase === 'downloading' ? (
             <div className="foot-status" aria-live="polite">
               <span className="spinner" />
-              <span>{updateProgress}%</span>
+              <span>{update.progress}%</span>
             </div>
-          )}
-          {updateDownloaded && (
+          ) : (
             <button type="button" className="foot-status as-button" onClick={onOpenSettings}>
-              Update ready — restart to install
-            </button>
-          )}
-          {updateAvailable && !updateDownloaded && !(updateProgress > 0 && updateProgress < 100) && (
-            <button type="button" className="foot-status as-button" onClick={onOpenSettings}>
-              Update available{updateVersion ? ` · v${updateVersion}` : ''}
+              {update.phase === 'ready' ? 'Update ready to install' : `Update available ? v${update.version}`}
             </button>
           )}
         </div>

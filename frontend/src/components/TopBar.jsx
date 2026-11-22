@@ -1,4 +1,3 @@
-import ProjectMenu from './ProjectMenu.jsx';
 import { desktop } from '../api.js';
 
 /* The window is frameless with a hidden title bar: Windows paints the native
@@ -10,7 +9,6 @@ export default function TopBar({
   projectPath,
   menuOpen,
   onToggleMenu,
-  onCloseMenus,
   menu,
 }) {
   return (
@@ -37,9 +35,7 @@ export default function TopBar({
         {menu}
       </div>
 
-      <div className={`bar-drag${desktop.isElectron ? ' draggable' : ''}`} onClick={onCloseMenus} />
+      <div className={`bar-drag${desktop.isElectron ? ' draggable' : ''}`} />
     </header>
   );
 }
-
-export { ProjectMenu };

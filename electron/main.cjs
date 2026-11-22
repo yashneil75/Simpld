@@ -10,8 +10,9 @@
  * window.electron.
  */
 
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const { randomBytes } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const net = require('node:net');
@@ -21,11 +22,14 @@ const isDev = !app.isPackaged;
 
 // Single instance, like any real desktop app: a second launch just
 // focuses the existing window instead of spawning a second backend.
-if (!app.requestSingleInstanceLock()) app.quit();
+const ownsInstance = app.requestSingleInstanceLock();
+if (!ownsInstance) app.quit();
 
 let backendProc = null;
+let backendToken = '';
 let backendPort = Number(process.env.SIMPLD_PORT || 8000);
 let mainWindow = null;
+let quitting = false;
 
 function backendBin() {
   if (process.env.BACKEND_BIN) return process.env.BACKEND_BIN;
@@ -52,7 +56,7 @@ function findFreePort(start) {
 }
 
 function backendHealth(port) {
-  return fetch(`http://127.0.0.1:${port}/api/health`)
+  return fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) })
     .then((r) => r.ok)
     .catch(() => false);
 }
@@ -61,25 +65,34 @@ async function waitForBackend(port, timeoutMs = 45000) {
   const start = Date.now();
   for (;;) {
     if (await backendHealth(port)) return true;
-    if (Date.now() - start > timeoutMs) return false;
+    if (!backendProc || Date.now() - start > timeoutMs) return false;
     await new Promise((r) => setTimeout(r, 300));
   }
 }
 
 function startBackend(port) {
   const projectRoot = path.join(__dirname, '..');
-  const env = { ...process.env, SIMPLD_PORT: String(port) };
+  backendToken = randomBytes(32).toString('hex');
+  const env = {
+    ...process.env,
+    SIMPLD_PORT: String(port),
+    SIMPLD_WATCH_STDIN: '1',
+    SIMPLD_BACKEND_TOKEN: backendToken,
+  };
   const bin = backendBin();
   if (bin) {
     console.log(`starting backend: ${bin}`);
-    backendProc = spawn(bin, [], { env, stdio: 'ignore' });
+    backendProc = spawn(bin, [], { env, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
   } else {
     const py = process.platform === 'win32' ? 'python' : 'python3';
     console.log(`starting backend: ${py} -m backend.app`);
-    backendProc = spawn(py, ['-m', 'backend.app'], { cwd: projectRoot, env, stdio: 'inherit' });
+    backendProc = spawn(py, ['-m', 'backend.app'], { cwd: projectRoot, env, stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true });
   }
-  backendProc.on('exit', (code) => console.log(`backend exited with code ${code}`));
+  backendProc.once('close', () => { backendProc = null; });
   backendProc.on('error', (err) => console.error('backend failed to start:', err));
+  backendProc.stdin.on('error', (err) => {
+    if (err.code !== 'EPIPE') console.error('backend stdin failed:', err);
+  });
 }
 
 function createWindow(port) {
@@ -102,15 +115,16 @@ function createWindow(port) {
       preload: path.join(__dirname, 'preload.cjs'),
       // Sync channel for the backend port; preload parses this. Keeps the
       // file:// renderer working with zero race (no executeJavaScript timing).
-      additionalArguments: [`--backend-port=${port}`],
+      additionalArguments: [`--backend-port=${port}`, `--backend-token=${backendToken}`],
     },
   });
 
-  // Legacy hook: some renderer code still reads window.__BACKEND_PORT.
-  mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents
-      .executeJavaScript(`window.__BACKEND_PORT = ${port};`)
-      .catch(() => {});
+  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (['https:', 'http:'].includes(new URL(url).protocol)) {
+      shell.openExternal(url).catch(console.error);
+    }
+    return { action: 'deny' };
   });
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
@@ -120,9 +134,7 @@ function createWindow(port) {
     mainWindow.loadFile(path.join(__dirname, '..', 'frontend', 'dist', 'index.html'));
   }
 
-  mainWindow.on('maximize', () => mainWindow.webContents.send('window:maximized', true));
-  mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false));
-
+  mainWindow.on('closed', () => { mainWindow = null; });
   // Zoom shortcuts: Electron has no default menu/accelerators, so Ctrl/Cmd
   // +/-/0 do nothing unless we handle them here. Also covers the numpad.
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -143,30 +155,36 @@ function createWindow(port) {
   });
 }
 
-ipcMain.handle('window:minimize', () => mainWindow?.minimize());
-ipcMain.handle('window:toggle-maximize', () => {
-  if (!mainWindow) return false;
-  if (mainWindow.isMaximized()) {
-    mainWindow.unmaximize();
-    return false;
-  }
-  mainWindow.maximize();
-  return true;
-});
-ipcMain.handle('window:close', () => mainWindow?.close());
-ipcMain.handle('backend:port', () => backendPort);
 ipcMain.handle('dialog:open-folder', async () => {
   const res = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   if (res.canceled || res.filePaths.length === 0) return null;
   return res.filePaths[0];
 });
 
-ipcMain.handle('update:check', async () => {
-  try { return await autoUpdater.checkForUpdates(); }
-  catch (err) { console.error('update check failed:', err); throw err; }
-});
+let updateStatus = { phase: 'idle' };
+
+function publishUpdate(phase, fields = {}) {
+  updateStatus = { phase, ...fields };
+  mainWindow?.webContents.send('update:status', updateStatus);
+}
+
+async function checkForUpdates() {
+  if (['checking', 'available', 'downloading', 'ready'].includes(updateStatus.phase)) return;
+  publishUpdate('checking');
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (result === null && updateStatus.phase === 'checking') {
+      publishUpdate('failed', { error: 'Updates are available in packaged builds.' });
+    }
+  } catch (err) {
+    publishUpdate('failed', { error: err.message });
+  }
+}
+
+ipcMain.handle('update:status', () => updateStatus);
+ipcMain.handle('update:check', checkForUpdates);
 ipcMain.handle('update:install', () => {
-  autoUpdater.quitAndInstall();
+  if (updateStatus.phase === 'ready') autoUpdater.quitAndInstall();
 });
 
 app.on('second-instance', () => {
@@ -176,26 +194,25 @@ app.on('second-instance', () => {
   }
 });
 
-app.whenReady().then(async () => {
-  backendPort = await findFreePort(backendPort);
-  const alreadyUp = await backendHealth(backendPort);
-  if (!alreadyUp) {
+if (ownsInstance) app.whenReady().then(async () => {
+  if (!(isDev && process.env.SIMPLD_PORT && await backendHealth(backendPort))) {
+    backendPort = await findFreePort(backendPort);
     startBackend(backendPort);
-    const ok = await waitForBackend(backendPort);
-    if (!ok) console.error('backend did not become healthy in time');
-  } else {
-    console.log(`reusing backend on port ${backendPort}`);
+    if (!(await waitForBackend(backendPort))) console.error('backend did not become healthy in time');
   }
-  process.env.SIMPLD_PORT = String(backendPort);
   createWindow(backendPort);
 
   // Auto-update from GitHub Releases (published by the release workflow).
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('update-available', (info) => mainWindow?.webContents.send('update:available', info?.version || ''));
-  autoUpdater.on('update-downloaded', (info) => mainWindow?.webContents.send('update:downloaded', info?.version || ''));
-  autoUpdater.on('download-progress', (p) => mainWindow?.webContents.send('update:progress', Math.round(p?.percent || 0)));
-  autoUpdater.checkForUpdatesAndNotify().catch((err) => console.error('update check failed:', err));
+  autoUpdater.on('update-available', (info) => publishUpdate('available', { version: info.version }));
+  autoUpdater.on('update-not-available', () => publishUpdate('current'));
+  autoUpdater.on('download-progress', (info) => publishUpdate('downloading', {
+    version: updateStatus.version, progress: Math.round(info.percent),
+  }));
+  autoUpdater.on('update-downloaded', (info) => publishUpdate('ready', { version: info.version }));
+  autoUpdater.on('error', (err) => publishUpdate('failed', { error: err.message }));
+  if (!isDev) void checkForUpdates();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(backendPort);
@@ -206,6 +223,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  if (backendProc) backendProc.kill();
+app.on('will-quit', (event) => {
+  if (!backendProc) return;
+  event.preventDefault();
+  if (quitting) return;
+  quitting = true;
+  const child = backendProc;
+  const timer = setTimeout(() => child.kill(), 8000);
+  child.once('close', () => {
+    clearTimeout(timer);
+    app.quit();
+  });
+  child.stdin.end();
 });

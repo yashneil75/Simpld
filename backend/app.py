@@ -13,29 +13,60 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
+import sys
 import threading
+from contextlib import aclosing, asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend import config
-from backend.model import manager
+from backend import config, download as download_mod
+from backend.model import Phase, manager
 from backend.store import Store
 
 log = logging.getLogger("simpld.backend")
 
-app = FastAPI(title="Simpld backend")
 
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        yield
+    finally:
+        await manager.close()
+
+
+_desktop_token = os.environ.get("SIMPLD_BACKEND_TOKEN", "")
+_origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
+if _desktop_token:
+    _origins.add("null")  # Packaged Electron renderer uses file://.
+
+
+async def _authorize(request: Request):
+    if request.url.path == "/api/health":
+        return
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip("/") and origin not in _origins:
+        raise HTTPException(status_code=403, detail="Unrecognized request origin.")
+    supplied = request.headers.get("X-Simpld-Token", "").encode()
+    if _desktop_token and not secrets.compare_digest(supplied, _desktop_token.encode()):
+        raise HTTPException(status_code=401, detail="Invalid desktop session.")
+
+
+app = FastAPI(title="Simpld backend", lifespan=lifespan, dependencies=[Depends(_authorize)])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # desktop app on localhost; tightened in prod builds
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=sorted(_origins),
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "X-Simpld-Token"],
 )
 
 store = Store()
@@ -43,10 +74,17 @@ _state_lock = threading.Lock()
 _project = str(config.WORKSPACE)
 store.ensure_project(_project)
 _conversation: int | None = store.newest(_project)
-_model_name = config.DEFAULT_MODEL
-manager.select(_model_name)
-# Resuming the newest chat resumes its context as well.
-manager.set_history(store.load(_conversation) if _conversation is not None else [])
+
+
+@dataclass
+class ChatRun:
+    conversation: int | None
+    messages: list[dict]
+    finished: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+_active_chat: ChatRun | None = None
+_session_revision = 0
 
 
 # --- schemas ---------------------------------------------------------------
@@ -61,6 +99,7 @@ class DeleteProjectBody(BaseModel):
 
 class ChatBody(BaseModel):
     content: str
+    revision: int | None = None
 
 
 class SelectModelBody(BaseModel):
@@ -84,25 +123,39 @@ def _get_conversation() -> int | None:
 
 
 def _set_project(path: str) -> int | None:
-    global _project, _conversation
+    global _project, _conversation, _session_revision
     store.ensure_project(path)
-    newest = store.newest(path)
-    with _state_lock:
-        _project = path
-        _conversation = newest
-    return newest
+    _project, _conversation = path, store.newest(path)
+    _session_revision += 1
+    return _conversation
 
 
-def _ensure_conversation() -> int:
-    global _conversation
+def _begin_chat(body: ChatBody) -> ChatRun:
+    global _conversation, _active_chat
+    text = body.content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty message")
     with _state_lock:
-        conv = _conversation
-        project = _project
-    if conv is None:
-        conv = store.new_conversation(project)
-        with _state_lock:
-            _conversation = conv
-    return conv
+        if body.revision is not None and body.revision != _session_revision:
+            raise HTTPException(status_code=409, detail="The active chat changed before the message was sent.")
+        if _active_chat is not None or manager.phase == Phase.UNLOADING:
+            raise HTTPException(status_code=409, detail="A response is still in progress.")
+        if _conversation is None:
+            _conversation = store.new_conversation(_project)
+        store.append(_conversation, {"role": "user", "content": text})
+        _active_chat = ChatRun(_conversation, store.load(_conversation))
+        return _active_chat
+
+
+def _finish_chat(run: ChatRun, reply: str) -> None:
+    global _active_chat
+    with _state_lock:
+        try:
+            if run.conversation is not None and reply:
+                store.append(run.conversation, {"role": "assistant", "content": reply})
+        finally:
+            _active_chat = None
+            run.finished.set()
 
 
 def _setting(key: str, default):
@@ -119,133 +172,67 @@ def health() -> dict:
 
 @app.get("/api/system")
 def system_info() -> dict:
-    import ctypes, subprocess, re
-    # RAM (Windows)
-    ram_total = 0
-    ram_avail = 0
+    import subprocess
+
+    import psutil
+
+    ram = psutil.virtual_memory()
+    gib = 1024**3
+    vram_total = vram_free = None
+    gpu_type = "unknown"
     try:
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-        stat = MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        ram_total = stat.ullTotalPhys / (1024**3)
-        ram_avail = stat.ullAvailPhys / (1024**3)
-    except Exception:
-        pass
-    # VRAM: try discrete GPU (nvidia-smi), then iGPU/CPU-shared via WMI.
-    vram_total = None
-    vram_free = None
-    gpu_type = "none"
-    try:
-        out = subprocess.check_output(
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"],
-            stderr=subprocess.DEVNULL, text=True, timeout=5)
-        parts = out.strip().split(",")
-        if len(parts) >= 2:
-            vram_total = float(parts[0].strip()) / 1024.0
-            vram_free = float(parts[1].strip()) / 1024.0
+            stderr=subprocess.DEVNULL, text=True, timeout=5, creationflags=flags,
+        )
+        devices = []
+        for line in output.splitlines():
+            try:
+                total, free = (float(value) / 1024 for value in line.split(","))
+                devices.append((total, free))
+            except ValueError:
+                continue
+        if devices:
+            vram_total, vram_free = max(devices, key=lambda device: device[1])
             gpu_type = "discrete"
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
-    if vram_total is None:
-        # Fall back to Windows video controllers (iGPU or CPU).
-        try:
-            out = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty AdapterRAM"],
-                stderr=subprocess.DEVNULL, text=True, timeout=8)
-            vals = []
-            for line in out.split():
-                try:
-                    vals.append(float(line))
-                except ValueError:
-                    pass
-            if vals:
-                best = max(vals)
-                best_gb = best / (1024**3)
-                # iGPU reports a small dedicated slice but can use system RAM.
-                if best_gb < ram_total * 0.5:
-                    vram_total = ram_total
-                    vram_free = ram_avail
-                    gpu_type = "integrated"
-                else:
-                    vram_total = best_gb
-                    vram_free = best_gb
-                    gpu_type = "discrete"
-        except Exception:
-            pass
-    if vram_total is None:
-        # No GPU info at all -> assume CPU using system RAM.
-        vram_total = ram_total
-        vram_free = ram_avail
-        gpu_type = "cpu"
     return {
-        "ram_total_gb": round(ram_total, 1),
-        "ram_available_gb": round(ram_avail, 1),
-        "vram_total_gb": (round(vram_total, 1) if vram_total is not None else None),
-        "vram_available_gb": (round(vram_free, 1) if vram_free is not None else None),
+        "ram_total_gb": round(ram.total / gib, 1),
+        "ram_available_gb": round(ram.available / gib, 1),
+        "vram_total_gb": round(vram_total, 1) if vram_total is not None else None,
+        "vram_available_gb": round(vram_free, 1) if vram_free is not None else None,
         "gpu_type": gpu_type,
     }
 
 
 @app.get("/api/models")
-def get_models() -> dict:
-    status = manager.status()
-    return {"current": status["current"], "tiers": status["tiers"],
-            "running": status["running"], "loading": status["loading"],
-            "mock": status["mock"]}
+async def get_models() -> dict:
+    return manager.status()
 
 
 @app.post("/api/models/select")
-def select_model(body: SelectModelBody) -> dict:
+async def select_model(body: SelectModelBody) -> dict:
     try:
         return manager.select(body.name)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/models/load")
-def load_model() -> dict:
-    """Warm up the current model in the background (first load is slow)."""
+async def load_model() -> dict:
     return manager.load_in_background()
 
 
 @app.get("/api/models/library")
-def get_library() -> dict:
-    """Every tier plus hand-placed GGUFs, with sizes, current, and load state."""
-    from backend import download as download_mod
-
-    status = manager.status()
-    entries = download_mod.library()
-    for entry in entries:
-        if not entry["downloaded"]:
-            remote = download_mod.remote_size(entry["id"])
-            if remote is None:
-                remote = entry.get("remote_bytes")
-            entry["remote_bytes"] = remote
-    return {
-        "current": status["current"],
-        "running": status["running"],
-        "loading": status["loading"],
-        "mock": status["mock"],
-        "models": entries,
-    }
+async def get_library() -> dict:
+    entries = await asyncio.to_thread(download_mod.library)
+    return {**manager.status(), "models": entries, "downloads": download_mod.download_progress()}
 
 
 @app.post("/api/models/download")
 def start_model_download(body: SelectModelBody) -> dict:
-    from backend import download as download_mod
 
     try:
         return download_mod.start_download(body.name)
@@ -255,25 +242,30 @@ def start_model_download(body: SelectModelBody) -> dict:
 
 @app.post("/api/models/download/cancel")
 def cancel_model_download(body: SelectModelBody) -> dict:
-    from backend import download as download_mod
-    download_mod.cancel_download(body.name)
+    try:
+        download_mod.cancel_download(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"cancelled": body.name}
 
 
 @app.get("/api/models/download/progress")
 def download_progress() -> dict:
-    from backend import download as download_mod
 
     return {"downloads": download_mod.download_progress()}
 
 
 @app.delete("/api/models/library/{model_id:path}")
-def delete_model(model_id: str) -> dict:
-    from backend import download as download_mod
-
-    if model_id == manager.status()["current"]:
-        raise HTTPException(status_code=400, detail="Cannot delete the active model")
-    if not download_mod.delete(model_id):
+async def delete_model(model_id: str) -> dict:
+    if _active_chat is not None:
+        raise HTTPException(status_code=409, detail="Wait for the current response before deleting the model.")
+    try:
+        deleted = await manager.delete_weights(model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="Model file not found")
     return {"deleted": model_id}
 
@@ -293,26 +285,54 @@ def get_projects() -> dict:
 
 @app.post("/api/projects/open")
 def open_project(body: OpenProjectBody) -> dict:
-    _set_project(body.path)
-    return {"current": body.path, "conversation": _get_conversation()}
+    with _state_lock:
+        conv = _set_project(body.path)
+    return {"current": body.path, "conversation": conv}
 
 
 @app.post("/api/projects/delete")
 def delete_project(body: DeleteProjectBody) -> dict:
     if body.path == str(config.WORKSPACE):
         raise HTTPException(status_code=400, detail="The workspace folder cannot be deleted")
-    store.delete_project(body.path)
-    if body.path == _get_project():
-        _set_project(str(config.WORKSPACE))
-    return {"current": _get_project()}
+    with _state_lock:
+        if _active_chat and _active_chat.conversation is not None:
+            if store.project_of(_active_chat.conversation) == body.path:
+                _active_chat.conversation = None
+        store.delete_project(body.path)
+        if body.path == _project:
+            _set_project(str(config.WORKSPACE))
+        return {"current": _project}
+
+
+@app.get("/api/session")
+async def get_session(settled: bool = False) -> dict:
+    run = _active_chat
+    if settled and run is not None:
+        try:
+            await asyncio.wait_for(run.finished.wait(), timeout=3)
+        except TimeoutError:
+            pass
+    return await asyncio.to_thread(_session_snapshot)
+
+
+def _session_snapshot() -> dict:
+    with _state_lock:
+        return {
+            "revision": _session_revision,
+            "currentProject": _project,
+            "workspace": str(config.WORKSPACE),
+            "projects": [{"path": path, "name": Path(path).name or path} for path in store.projects()],
+            "currentChat": _conversation,
+            "messages": store.load(_conversation) if _conversation is not None else [],
+            "chats": store.summaries(),
+        }
 
 
 @app.get("/api/history")
 def get_history() -> dict:
-    conv = _get_conversation()
-    if conv is None:
-        return {"messages": [], "conversation": None}
-    return {"messages": store.load(conv), "conversation": conv}
+    with _state_lock:
+        conv = _conversation
+        return {"messages": store.load(conv) if conv is not None else [], "conversation": conv}
 
 
 @app.get("/api/conversations")
@@ -322,38 +342,36 @@ def get_conversations() -> dict:
 
 @app.post("/api/conversations/new")
 def new_chat() -> dict:
-    global _conversation
+    global _conversation, _session_revision
     with _state_lock:
         _conversation = None
-    # The store starts empty, so the model's context must too -- otherwise
-    # replies keep answering the previous chat.
-    manager.reset_history()
+        _session_revision += 1
     return {"conversation": None}
 
 
 @app.post("/api/conversations/{conversation_id}/open")
 def open_chat(conversation_id: int) -> dict:
-    global _conversation, _project
+    global _conversation, _project, _session_revision
     with _state_lock:
-        _conversation = conversation_id
-    project = store.project_of(conversation_id)
-    if project is not None:
-        with _state_lock:
-            _project = project
-    # Continuing an old chat resumes its context, not the previous one's.
-    manager.set_history(store.load(conversation_id))
-    return {"conversation": conversation_id, "project": _get_project()}
+        project = store.project_of(conversation_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        _conversation, _project = conversation_id, project
+        _session_revision += 1
+        return {"conversation": conversation_id, "project": project}
 
 
 @app.delete("/api/conversations/{conversation_id}")
 def delete_chat(conversation_id: int) -> dict:
-    global _conversation
-    store.delete_conversation(conversation_id)
+    global _conversation, _session_revision
     with _state_lock:
+        store.delete_conversation(conversation_id)
+        if _active_chat and _active_chat.conversation == conversation_id:
+            _active_chat.conversation = None
         if conversation_id == _conversation:
             _conversation = None
-        current = _conversation
-    return {"conversation": current}
+            _session_revision += 1
+        return {"conversation": _conversation}
 
 
 @app.get("/api/settings")
@@ -368,63 +386,56 @@ def put_setting(key: str, body: SettingBody) -> dict:
 
 
 @app.post("/api/chat")
-def chat(body: ChatBody) -> dict:
-    """Non-streaming fallback: full reply as JSON (tests, curl, scripting)."""
-    text = body.content.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Empty message")
-    conv = _ensure_conversation()
-    store.append(conv, {"role": "user", "content": text})
-    model = manager.ensure()
-    loop = asyncio.new_event_loop()
+async def chat(body: ChatBody) -> dict:
+    run = _begin_chat(body)
+    conversation = run.conversation
+    parts = []
     try:
-        if hasattr(model, "_llm") or type(model).__name__ == "Model":
-            # llama_cpp streams synchronously; collect in a worker thread.
-            parts: list[str] = []
-            def _run():
-                for tok in model.send_message(text):
-                    parts.append(tok)
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            t.join()
-            reply = "".join(parts)
-        else:
-            reply = "".join(model.send_message(text))
+        async with aclosing(manager.tokens(run.messages)) as tokens:
+            async for token in tokens:
+                parts.append(token)
+    except Exception as exc:
+        log.exception("chat failed")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
-        loop.close()
-    store.append(conv, {"role": "assistant", "content": reply})
-    return {"reply": reply, "conversation": conv}
+        _finish_chat(run, "".join(parts))
+    return {"reply": "".join(parts), "conversation": conversation}
+
+
+class ChatResponse(StreamingResponse):
+    async def stream_response(self, send):
+        async with aclosing(self.body_iterator):
+            await super().stream_response(send)
 
 
 @app.post("/api/chat/stream")
-def chat_stream(body: ChatBody):
-    """SSE stream: `data: {\"token\": ...}` events, then `data: [DONE]`."""
-    text = body.content.strip()
-    if not text:
+async def chat_stream(body: ChatBody):
+    if not body.content.strip():
         raise HTTPException(status_code=400, detail="Empty message")
-    conv = _ensure_conversation()
-    store.append(conv, {"role": "user", "content": text})
 
-    def event_stream():
-        model = manager.ensure()
-        parts: list[str] = []
+    async def event_stream():
         try:
-            for token in model.send_message(text):
-                parts.append(token)
-                yield f"data: {json.dumps({'token': token})}\n\n"
-        except Exception as exc:  # stream the error so the UI can show it
+            run = _begin_chat(body)
+        except HTTPException as exc:
+            yield f"data: {json.dumps({'error': exc.detail})}\n\n"
+            return
+        parts = []
+        error = None
+        try:
+            async with aclosing(manager.tokens(run.messages)) as tokens:
+                async for token in tokens:
+                    parts.append(token)
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+        except Exception as exc:
             log.exception("chat stream failed")
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            error = str(exc)
         finally:
-            full = "".join(parts)
-            if full:
-                try:
-                    store.append(conv, {"role": "assistant", "content": full})
-                except Exception:
-                    log.exception("could not persist assistant reply")
+            _finish_chat(run, "".join(parts))
+        if error:
+            yield f"data: {json.dumps({'error': error})}\n\n"
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return ChatResponse(event_stream(), media_type="text/event-stream")
 
 
 def main() -> None:
@@ -436,7 +447,18 @@ def main() -> None:
     print(f"Simpld backend on http://127.0.0.1:{config.PORT}", flush=True)
     # Pass the app object (not an import string) so frozen executables,
     # which have no normal import system, can still serve.
-    uvicorn.run(app, host="127.0.0.1", port=config.PORT, log_level="info")
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=config.PORT, log_level="info",
+        timeout_graceful_shutdown=2,
+    ))
+    if os.environ.get("SIMPLD_WATCH_STDIN") == "1":
+        def watch_parent():
+            # Electron owns the write end and closes it when quitting.
+            sys.stdin.buffer.read()
+            server.should_exit = True
+
+        threading.Thread(target=watch_parent, daemon=True).start()
+    server.run()
 
 
 if __name__ == "__main__":

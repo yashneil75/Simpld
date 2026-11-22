@@ -613,12 +613,6 @@ button.foot-status:hover { background: var(--hover); color: var(--ink); }
   color: var(--foot);
 }
 
-.mock-badge {
-  padding: 2px 8px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 999px;
-}
-
 .model { position: relative; }
 
 .model-trigger {
@@ -893,15 +887,6 @@ button.foot-status:hover { background: var(--hover); color: var(--ink); }
   font-size: 12px;
   font-weight: 500;
   color: var(--muted);
-}
-
-.recommended {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--ink);
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 1px 8px;
 }
 
 .model-card-desc {

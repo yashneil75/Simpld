@@ -1,245 +1,187 @@
-"""Local LLM wrapper.
-
-Real path mirrors the old top-level model.py: lazy-load the GGUF file for the
-selected tier via llama_cpp and stream chat completions token by token.
-"""
+"""Lifecycle and chat transport for the local llama.cpp server."""
 
 from __future__ import annotations
 
-import ctypes
+import asyncio
+import json
+import os
+import secrets
+import shutil
+import socket
+import subprocess
 import sys
-import threading
-from datetime import datetime
-from typing import Iterator
+from contextlib import suppress
+from enum import StrEnum
+from pathlib import Path
 
-from backend import config
-from backend import download as download_mod
+import httpx
 
-# llama.cpp init lines worth surfacing for KV debugging: the llama_kv_cache
-# lines record which cache types were *actually* applied, so a requested q4_0
-# that the backend can't honour (flash attention missing, ISWA mixed cache,
-# etc.) shows up here as a "(f16)" fallback.
-_KV_LOG_MATCH = ("kv_cache", "iswa", "flash_attn", "quantiz", "fallback", "atten")
+from backend import config, download
 
 
-def _dump_kv_debug(model_name: str, logs: list[str]) -> None:
-    """Echo KV-relevant llama.cpp init lines to stderr and a log file."""
-    picked = [line.rstrip() for line in logs if any(m in line for m in _KV_LOG_MATCH)]
-    if not picked:
-        return
-    for line in picked:
-        print(f"[kv-debug] {model_name}: {line}", file=sys.stderr, flush=True)
-    try:
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(config.MODEL_DIR / "kv_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"\n=== {stamp} model {model_name} ===\n")
-            for line in picked:
-                f.write(line + "\n")
-    except OSError:
-        pass  # log file is best-effort; stderr already got the lines
-
-
-def spec_for(id: str) -> dict:
-    """Catalogue spec for a tier id; raises for anything else."""
-    if id in config.MODELS:
-        return config.MODELS[id]
-    available = ", ".join(config.MODELS)
-    raise ValueError(f"Unknown model {id!r}. Available: {available}")
-
-
-class Model:
-    """A real GGUF behind a catalogue tier id."""
-
-    def __init__(self, id: str = config.DEFAULT_MODEL):
-        self.name = id
-        self.spec = spec_for(id)
-        self._llm = None
-        self._messages: list[dict] = []
-        self._gen = 0  # bumped whenever history is replaced; stale streams drop out
-        self._lock = threading.Lock()
-
-    @property
-    def is_running(self) -> bool:
-        return self._llm is not None
-
-    def start(self) -> None:
-        if self._llm is not None:
-            return
-        from llama_cpp import Llama, llama_cpp
-
-        path = download_mod.resolve(self.name)
-        if path is None:
-            if self.name in config.MODELS:
-                path = download_mod.download(self.name)
-            else:
-                raise RuntimeError(f"Model file for {self.name!r} is not on disk")
-
-        # Capture llama.cpp's init logs only while the context is built, then
-        # restore whatever callback llama-cpp-python had installed.
-        logs: list[str] = []
-        capture_cb = llama_cpp.llama_log_callback(
-            lambda _level, text, _user: logs.append(text.decode("utf-8", "replace"))
-        )
-        prev_cb = llama_cpp.llama_log_callback()
-        prev_data = ctypes.c_void_p()
-        llama_cpp.llama_log_get(ctypes.byref(prev_cb), ctypes.byref(prev_data))
-        llama_cpp.llama_log_set(capture_cb, None)
-        try:
-            kv_quant = self.spec["kv_quant"]
-            # swa_full=False: llama.h's C default is True, which makes ISWA
-            # models (e.g. Gemma 4) allocate their sliding-window cache for the
-            # full context instead of just the window (~16x more KV memory).
-            self._llm = Llama(
-                model_path=str(path),
-                n_ctx=self.spec["ctx"],
-                n_gpu_layers=-1,
-                flash_attn=self.spec["flash_attn"],
-                type_k=kv_quant,
-                type_v=kv_quant,
-                swa_full=False,
-                verbose=False,
-            )
-        finally:
-            llama_cpp.llama_log_set(prev_cb, prev_data)
-            _dump_kv_debug(self.name, logs)
-
-    def stop(self) -> None:
-        if self._llm is None:
-            return
-        self._llm.close()
-        self._llm = None
-
-    def get_history(self) -> list[dict]:
-        with self._lock:
-            return list(self._messages)
-
-    def set_history(self, messages: list[dict]) -> None:
-        clean = [
-            {"role": m["role"], "content": m["content"]}
-            for m in messages
-            if m.get("role") in ("system", "user", "assistant")
-            and isinstance(m.get("content"), str)
-        ]
-        with self._lock:
-            self._messages = clean
-            self._gen += 1
-
-    def reset_history(self) -> None:
-        with self._lock:
-            self._messages = []
-            self._gen += 1
-
-    def send_message(self, message: str) -> Iterator[str]:
-        if self._llm is None:
-            raise RuntimeError("Model is not running. Call start() first.")
-        with self._lock:
-            gen = self._gen
-            self._messages.append({"role": "user", "content": message})
-            history = list(self._messages)
-        stream = self._llm.create_chat_completion(
-            messages=history,
-            temperature=self.spec["temp"],
-            stream=True,
-        )
-        parts: list[str] = []
-        for chunk in stream:
-            delta = chunk["choices"][0]["delta"].get("content")
-            if delta:
-                parts.append(delta)
-                yield delta
-        with self._lock:
-            if gen == self._gen:
-                self._messages.append({"role": "assistant", "content": "".join(parts)})
+class Phase(StrEnum):
+    UNLOADED = "unloaded"
+    LOADING = "loading"
+    READY = "ready"
+    FAILED = "failed"
+    UNLOADING = "unloading"
 
 
 class ModelManager:
-    def __init__(self, name: str = config.DEFAULT_MODEL):
-        self._lock = threading.Lock()
-        self.name = name
-        self._model: Model | None = None
-        self._loading = False
-        self._history: list[dict] = []
+    def __init__(self):
+        self.name = config.DEFAULT_MODEL
+        self.phase = Phase.UNLOADED
+        self.error: str | None = None
+        self._load_task: asyncio.Task | None = None
+        self._process: subprocess.Popen | None = None
+        self._client: httpx.AsyncClient | None = None
 
-    def _build(self, name: str) -> Model:
-        return Model(name)
-
-    def select(self, name: str) -> dict:
-        spec_for(name)
-        with self._lock:
-            if self._model is not None and name == self.name:
-                return self.status_locked()
-            if self._model is not None:
-                carried = self._model.get_history()
-                if carried:
-                    self._history = carried
-                try:
-                    self._model.stop()
-                except Exception:
-                    pass
-                self._model = None
-            self.name = name
-            return self.status_locked()
-
-    def set_history(self, messages: list[dict]) -> None:
-        with self._lock:
-            self._history = [
-                {"role": m["role"], "content": m["content"]}
-                for m in messages
-                if m.get("role") in ("system", "user", "assistant")
-                and isinstance(m.get("content"), str)
-            ]
-            if self._model is not None:
-                self._model.set_history(self._history)
-
-    def reset_history(self) -> None:
-        self.set_history([])
-
-    def status_locked(self) -> dict:
-        model = self._model
+    def status(self) -> dict:
+        if self.phase == Phase.READY and self._process.poll() is not None:
+            self.phase = Phase.FAILED
+            self.error = "llama-server exited. See llama-server.log in the model folder."
         return {
             "current": self.name,
-            "running": bool(model is not None and model.is_running),
-            "loading": self._loading,
+            "phase": self.phase,
+            "error": self.error,
+            "running": self.phase == Phase.READY,
+            "loading": self.phase == Phase.LOADING,
             "mock": False,
             "tiers": [
-                {"name": tier, "description": spec["description"]}
-                for tier, spec in config.MODELS.items()
+                {"name": name, "label": spec["label"], "description": spec["description"]}
+                for name, spec in config.MODELS.items()
             ],
         }
 
-    def status(self) -> dict:
-        with self._lock:
-            return self.status_locked()
-
-    def ensure(self):
-        with self._lock:
-            if self._model is None:
-                self._model = self._build(self.name)
-                self._model.set_history(self._history)
-            model = self._model
-        model.start()
-        return model
+    def select(self, name: str) -> dict:
+        # The catalogue currently exposes one supported runtime configuration.
+        if name != self.name:
+            raise ValueError(f"Unknown model {name!r}. Available: {self.name}")
+        return self.status()
 
     def load_in_background(self) -> dict:
-        with self._lock:
-            if self._loading:
-                return self.status_locked()
-            if self._model is not None and self._model.is_running:
-                return self.status_locked()
-            self._loading = True
+        self.status()
+        if self.phase in {Phase.UNLOADED, Phase.FAILED}:
+            self.phase, self.error = Phase.LOADING, None
+            self._load_task = asyncio.create_task(self._load())
+        return self.status()
 
-        def _run() -> None:
-            try:
-                self.ensure()
-            except Exception:
-                pass
-            finally:
-                with self._lock:
-                    self._loading = False
+    async def _load(self) -> None:
+        try:
+            await self._close_runtime()
+            executable = os.environ.get("SIMPLD_LLAMA_SERVER")
+            if executable is None and getattr(sys, "frozen", False):
+                name = "llama-server.exe" if os.name == "nt" else "llama-server"
+                bundled = Path(sys.executable).parent / "llama" / name
+                if bundled.is_file():
+                    executable = str(bundled)
+            executable = executable or shutil.which("llama-server")
+            if not executable or not Path(executable).is_file():
+                raise RuntimeError("Install a Kintsugi 27B compatible llama-server (Unsloth Inkling 2 build) or set SIMPLD_LLAMA_SERVER to its executable.")
+            executable = str(Path(executable).resolve())
+            path = await download.download_for_runtime(self.name)
+            env = os.environ.copy()
+            if sys.platform.startswith("linux"):
+                libraries = [str(Path(executable).parent)]
+                original = env.pop("LD_LIBRARY_PATH_ORIG", None) if getattr(sys, "frozen", False) else env.get("LD_LIBRARY_PATH")
+                if original:
+                    libraries.append(original)
+                env["LD_LIBRARY_PATH"] = os.pathsep.join(libraries)
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            key = secrets.token_urlsafe(32)
+            with (config.MODEL_DIR / "llama-server.log").open("wb") as log:
+                self._process = subprocess.Popen([
+                    executable, "--model", str(path.resolve()), "--host", "127.0.0.1",
+                    "--port", str(port), "--api-key", key, "--ctx-size",
+                    str(config.MODELS[self.name]["ctx"]), "--parallel", "1",
+                    "--reasoning-format", "deepseek-legacy", "--reasoning-budget", "1024", "--no-webui",
+                ], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env)
+            self._client = httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{port}",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=httpx.Timeout(120, connect=2),
+                trust_env=False,
+            )
+            async with asyncio.timeout(300):
+                while self._process.poll() is None:
+                    try:
+                        response = await self._client.get("/health", timeout=2)
+                        if response.status_code == 200:
+                            self.phase = Phase.READY
+                            return
+                    except httpx.RequestError:
+                        pass
+                    await asyncio.sleep(0.25)
+            raise RuntimeError("llama-server exited during load. See llama-server.log in the model folder.")
+        except Exception as exc:
+            await self._close_runtime()
+            self.error = str(exc) or "Kintsugi 27B took too long to load."
+            self.phase = Phase.FAILED
 
-        threading.Thread(target=_run, daemon=True).start()
-        with self._lock:
-            return self.status_locked()
+    async def tokens(self, messages: list[dict]):
+        self.load_in_background()
+        if self.phase == Phase.LOADING:
+            await asyncio.shield(self._load_task)
+        if self.phase != Phase.READY:
+            raise RuntimeError(self.error or "Model unavailable.")
+        history = [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+            if message.get("role") in {"system", "user", "assistant"}
+            and isinstance(message.get("content"), str)
+        ]
+        async with self._client.stream("POST", "/v1/chat/completions", json={
+            "messages": history, "stream": True, "max_tokens": 4096,
+        }) as response:
+            if response.is_error:
+                await response.aread()
+                raise RuntimeError(response.text)
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    return
+                chunk = json.loads(payload)
+                if chunk.get("error"):
+                    raise RuntimeError(str(chunk["error"]))
+                for choice in chunk.get("choices", []):
+                    if token := choice.get("delta", {}).get("content"):
+                        yield token
+            raise RuntimeError("llama-server ended its response early.")
+
+    async def delete_weights(self, name: str) -> bool:
+        self.select(name)
+        if self.phase in {Phase.LOADING, Phase.UNLOADING}:
+            raise RuntimeError("Wait for the model operation to finish before deleting it.")
+        self.phase = Phase.UNLOADING
+        try:
+            await self._close_runtime()
+            return download.delete(name)
+        finally:
+            self.phase, self.error = Phase.UNLOADED, None
+
+    async def close(self) -> None:
+        if self._load_task is not None:
+            self._load_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._load_task
+        await self._close_runtime()
+        self.phase, self.error = Phase.UNLOADED, None
+
+    async def _close_runtime(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+        if self._process is not None:
+            if self._process.poll() is None:
+                with suppress(ProcessLookupError):
+                    self._process.kill()
+            await asyncio.to_thread(self._process.wait)
+            self._process = None
 
 
 manager = ModelManager()

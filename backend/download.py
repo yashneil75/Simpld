@@ -1,53 +1,51 @@
-"""Model library: catalogue tiers, local GGUF discovery, downloads, deletes.
-
-Files may live anywhere under MODEL_DIR (the existing installs use per-tier
-subfolders like `lite/...gguf`), so everything resolves by recursive filename
-search, not by fixed path. New downloads go to `MODEL_DIR/<tier>/<file>`.
-
-Downloads stream with progress into `_progress` so the settings popup can
-poll `download_progress()`. Only catalogue tiers are listed; anything else on
-disk is ignored.
-"""
+"""Download and discover the supported GGUF files."""
 
 from __future__ import annotations
 
+import asyncio
 import threading
+from enum import StrEnum
 from pathlib import Path
+from urllib.parse import quote
+from uuid import uuid4
 
 import requests
-from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
 
 from backend import config
 
-# name/id -> {"downloaded": int, "total": int|None, "status": str, "error": str|None}
-# status is one of queued/downloading/done/error.
+
+class Phase(StrEnum):
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
+    DONE = "done"
+    ERROR = "error"
+
+
+_ACTIVE = {Phase.QUEUED, Phase.DOWNLOADING, Phase.CANCELLING}
+_changed = threading.Condition()
 _progress: dict[str, dict] = {}
-_progress_lock = threading.Lock()
-_cancelled: set[str] = set()
-
-CUSTOM_CTX = 32768
 
 
-def _tier_dir(name: str) -> Path:
-    d = config.MODEL_DIR / name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def spec_for(name: str) -> dict:
+    if name not in config.MODELS:
+        raise ValueError(f"Unknown model {name!r}. Available: {', '.join(config.MODELS)}")
+    return config.MODELS[name]
 
 
 def local_path(name: str) -> Path:
-    """Canonical destination for fresh downloads of a catalogue tier."""
-    return _tier_dir(name) / config.MODELS[name]["file"]
+    return config.MODEL_DIR / name / spec_for(name)["file"]
 
 
 def find_local(name: str) -> Path | None:
-    """The on-disk GGUF for a catalogue tier, wherever it sits under MODEL_DIR."""
     if name not in config.MODELS:
         return None
-    wanted = config.MODELS[name]["file"]
-    for path in sorted(config.MODEL_DIR.rglob("*.gguf")):
-        if ".cache" in path.parts:
-            continue
-        if path.name == wanted:
+    canonical = local_path(name)
+    if canonical.is_file():
+        return canonical
+    for path in config.MODEL_DIR.rglob(canonical.name):
+        if ".cache" not in path.relative_to(config.MODEL_DIR).parts and path.is_file():
             return path
     return None
 
@@ -57,165 +55,168 @@ def is_downloaded(name: str) -> bool:
 
 
 def library() -> list[dict]:
-    """One entry per catalogue tier, with sizes and paths."""
     entries = []
-    for tier, spec in config.MODELS.items():
-        path = find_local(tier)
-        entries.append(
-            {
-                "id": tier,
-                "label": tier,
-                "remote_bytes": (int(spec.get("size_gb", 0) * 1e9) if spec.get("size_gb") is not None else None),
-                "description": spec["description"],
-                "downloaded": path is not None,
-                "size_bytes": path.stat().st_size if path is not None else None,
-                "path": str(path) if path is not None else None,
-                "tier": spec.get("tier", tier),
-                "ctx": spec.get("ctx"),
-                "min_vram_gb": spec.get("min_vram_gb"),
-                "min_ram_gb": spec.get("min_ram_gb"),
-                "performance": spec.get("performance"),
-                "arch": spec.get("arch"),
-                "quant": spec.get("quant"),
-                "repo": spec.get("repo"),
-            }
-        )
+    for name, spec in config.MODELS.items():
+        path = find_local(name)
+        try:
+            size = path.stat().st_size if path is not None else None
+        except FileNotFoundError:
+            path, size = None, None
+        entries.append({
+            "id": name,
+            "label": spec["label"],
+            "remote_bytes": int(spec["size_gb"] * 1e9),
+            "description": spec["description"],
+            "downloaded": path is not None,
+            "size_bytes": size,
+            "path": str(path) if path is not None else None,
+            "ctx": spec["ctx"],
+            "min_vram_gb": spec["min_vram_gb"],
+            "min_ram_gb": spec["min_ram_gb"],
+            "arch": spec["arch"],
+            "quant": spec["quant"],
+            "repo": spec["repo"],
+        })
     return entries
 
 
-_remote_cache: dict[str, int | None] = {}
-
-
-def remote_size(name: str) -> int | None:
-    """Published byte size of a catalogue tier, for pre-download display."""
-    if name not in config.MODELS:
-        return None
-    if name in _remote_cache:
-        return _remote_cache[name]
-    spec = config.MODELS[name]
-    try:
-        _remote_cache[name] = get_hf_file_metadata(
-            hf_hub_url(spec["repo"], spec["file"])
-        ).size
-    except Exception:
-        preset = spec.get("size_gb")
-        _remote_cache[name] = int(preset * 1e9) if preset is not None else None
-    return _remote_cache[name]
-
-
-def resolve(id: str) -> Path | None:
-    """On-disk path for a catalogue tier id, else None."""
-    if id in config.MODELS:
-        return find_local(id)
-    return None
-
-
-def delete(id: str) -> bool:
-    """Delete the GGUF behind an id. Returns True when a file was removed."""
-    path = resolve(id)
-    if path is None or not path.exists():
-        return False
-    path.unlink()
-    return True
+def delete(name: str) -> bool:
+    with _changed:
+        path = find_local(name)
+        if path is None:
+            return False
+        path.unlink()
+        _progress.pop(name, None)
+        return True
 
 
 def download_progress() -> dict[str, dict]:
-    with _progress_lock:
-        return {k: dict(v) for k, v in _progress.items()}
+    with _changed:
+        return {name: dict(entry) for name, entry in _progress.items()}
 
 
-def _set_progress(name: str, **fields) -> None:
-    with _progress_lock:
-        entry = _progress.setdefault(
-            name, {"downloaded": 0, "total": None, "status": "queued", "error": None}
-        )
-        entry.update(fields)
+def _start_locked(name: str) -> dict:
+    spec_for(name)
+    entry = _progress.get(name)
+    if entry and entry["status"] in _ACTIVE:
+        return entry
+    path = find_local(name)
+    size = path.stat().st_size if path else 0
+    entry = _progress[name] = {
+        "downloaded": size, "total": size or None,
+        "status": Phase.DONE if path else Phase.QUEUED, "error": None,
+    }
+    if not path:
+        try:
+            threading.Thread(target=_worker, args=(name, entry), daemon=True).start()
+        except RuntimeError as exc:
+            entry.update(status=Phase.ERROR, error=str(exc))
+    return entry
 
 
 def start_download(name: str) -> dict:
-    """Begin a background download; poll download_progress() for bytes."""
-    if name not in config.MODELS:
-        available = ", ".join(config.MODELS)
-        raise ValueError(f"Unknown model {name!r}. Available: {available}")
-    if is_downloaded(name):
-        _set_progress(name, status="done")
-        return download_progress()[name]
-    with _progress_lock:
-        if _progress.get(name, {}).get("status") == "downloading":
-            return dict(_progress[name])
-    _set_progress(name, downloaded=0, total=None, status="queued", error=None)
-    thread = threading.Thread(target=_download_worker, args=(name,), daemon=True)
-    thread.start()
-    return download_progress()[name]
+    with _changed:
+        return dict(_start_locked(name))
 
 
 def cancel_download(name: str) -> None:
-    _cancelled.add(name)
-    with _progress_lock:
-        if name in _progress:
-            _progress[name]["status"] = "cancelled"
-            _progress[name]["error"] = "Cancelled"
+    spec_for(name)
+    with _changed:
+        entry = _progress.get(name)
+        if entry and entry["status"] in {Phase.QUEUED, Phase.DOWNLOADING}:
+            entry["status"] = Phase.CANCELLING
 
 
-def _download_worker(name: str) -> None:
-    spec = config.MODELS[name]
+class _Cancelled(Exception):
+    pass
+
+
+def _check_cancelled(entry: dict) -> None:
+    if entry["status"] == Phase.CANCELLING:
+        raise _Cancelled
+
+
+def _worker(name: str, entry: dict) -> None:
     dest = local_path(name)
-    tmp = dest.with_suffix(".gguf.part")
+    tmp = dest.with_suffix(f".{uuid4().hex}.gguf.part")
     try:
-        _set_progress(name, status="downloading")
-        total = remote_size(name)
-        _set_progress(name, total=total)
-        url = hf_hub_url(spec["repo"], spec["file"])
-        with requests.get(url, stream=True, timeout=30) as resp:
-            resp.raise_for_status()
-            if total is None:
-                length = resp.headers.get("content-length")
-                total = int(length) if length else None
-                _set_progress(name, total=total)
+        with _changed:
+            _check_cancelled(entry)
+            entry["status"] = Phase.DOWNLOADING
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        spec = spec_for(name)
+        url = f"https://huggingface.co/{quote(spec['repo'])}/resolve/main/{quote(spec['file'])}"
+        with requests.get(
+            url,
+            headers={"Accept-Encoding": "identity"}, stream=True, timeout=30,
+        ) as response:
+            response.raise_for_status()
+            length = response.headers.get("Content-Length")
+            total = int(length) if length else None
+            with _changed:
+                _check_cancelled(entry)
+                entry["total"] = total
             done = 0
-            with open(tmp, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if name in _cancelled:
-                        raise RuntimeError("Cancelled")
-                    if not chunk:
-                        continue
-                    fh.write(chunk)
+            with tmp.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    with _changed:
+                        _check_cancelled(entry)
+                    output.write(chunk)
                     done += len(chunk)
-                    _set_progress(name, downloaded=done)
-        tmp.replace(dest)
-        _set_progress(name, downloaded=dest.stat().st_size, status="done")
-    except Exception as exc:  # keep partial file out of the library
+                    with _changed:
+                        entry["downloaded"] = done
+        if not done or (total is not None and done != total):
+            raise RuntimeError("The download ended before the complete file arrived.")
+        with tmp.open("rb") as downloaded:
+            if downloaded.read(4) != b"GGUF":
+                raise RuntimeError("The server did not return a GGUF file.")
+        with _changed:
+            _check_cancelled(entry)
+            if dest.is_file():
+                tmp.unlink()
+            else:
+                tmp.replace(dest)
+            entry.update(status=Phase.DONE, total=done)
+            _changed.notify_all()
+    except Exception as exc:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
-        if name in _cancelled:
-            _set_progress(name, status="cancelled", error=None)
-            _cancelled.discard(name)
-        else:
-            _set_progress(name, status="error", error=str(exc))
+        with _changed:
+            if entry["status"] == Phase.CANCELLING:
+                entry["status"] = Phase.CANCELLED
+            else:
+                entry.update(status=Phase.ERROR, error=str(exc))
+            _changed.notify_all()
+
+
+def _completed_path(name: str, entry: dict) -> Path:
+    if entry["status"] != Phase.DONE:
+        raise RuntimeError(entry["error"] or "Download cancelled")
+    path = find_local(name)
+    if path is None:
+        raise RuntimeError("The downloaded file was removed.")
+    return path
+
+
+async def download_for_runtime(name: str) -> Path:
+    # Retain the exact job so a retry cannot replace the result we await.
+    with _changed:
+        entry = _start_locked(name)
+    while True:
+        with _changed:
+            if entry["status"] not in _ACTIVE:
+                return _completed_path(name, entry)
+        await asyncio.sleep(0.25)
 
 
 def download(name: str) -> Path:
-    """Blocking download, used as a fallback when chat starts with no file.
-
-    Prefers the recursive lookup so hand-placed files are honoured; only hits
-    the network when nothing is on disk.
-    """
-    if name not in config.MODELS:
-        available = ", ".join(config.MODELS)
-        raise ValueError(f"Unknown model {name!r}. Available: {available}")
-    found = find_local(name)
-    if found is not None:
-        return found
-    spec = config.MODELS[name]
-    dest = local_path(name)
-    hf_hub_download(
-        repo_id=spec["repo"],
-        filename=spec["file"],
-        local_dir=str(dest.parent),
-    )
-    return dest
+    """Join the same download used by Settings if the file is missing."""
+    with _changed:
+        entry = _start_locked(name)
+        _changed.wait_for(lambda: entry["status"] not in _ACTIVE)
+        return _completed_path(name, entry)
 
 
 if __name__ == "__main__":

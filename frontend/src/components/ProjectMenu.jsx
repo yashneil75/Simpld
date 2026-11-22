@@ -6,7 +6,6 @@ export default function ProjectMenu({
   current,
   workspace,
   onOpen,
-  onBrowse,
   onDelete,
 }) {
   if (!open) return null;
