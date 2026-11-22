@@ -33,41 +33,45 @@ async function req(path, options = {}) {
   return res.json();
 }
 
+// Keep request encoding in one place for endpoints that send JSON bodies.
+const post = (path, body) => req(path, {
+  method: 'POST',
+  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+});
+const remove = (path) => req(path, { method: 'DELETE' });
+
 export const api = {
+  decidePermission: (id, allow) => post(`/api/permissions/${id}`, { allow }),
   models: (signal) => req('/api/models', { signal }),
-  selectModel: (name) =>
-    req('/api/models/select', { method: 'POST', body: JSON.stringify({ name }) }),
-  openProject: (path) =>
-    req('/api/projects/open', { method: 'POST', body: JSON.stringify({ path }) }),
-  deleteProject: (path) =>
-    req('/api/projects/delete', { method: 'POST', body: JSON.stringify({ path }) }),
+  selectModel: (name) => post('/api/models/select', { name }),
+  openProject: (path) => post('/api/projects/open', { path }),
+  deleteProject: (path) => post('/api/projects/delete', { path }),
   session: (signal, settled = false) => req(settled ? '/api/session?settled=true' : '/api/session', { signal }),
-  newChat: () => req('/api/conversations/new', { method: 'POST' }),
-  openChat: (id) => req(`/api/conversations/${id}/open`, { method: 'POST' }),
-  deleteChat: (id) => req(`/api/conversations/${id}`, { method: 'DELETE' }),
+  newChat: () => post('/api/conversations/new'),
+  openChat: (id) => post(`/api/conversations/${id}/open`),
+  deleteChat: (id) => remove(`/api/conversations/${id}`),
   settings: (signal) => req('/api/settings', { signal }),
   setSetting: (key, value) =>
     req(`/api/settings/${key}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   library: (signal) => req('/api/models/library', { signal }),
   system: (signal) => req('/api/system', { signal }),
-  startDownload: (id) =>
-    req('/api/models/download', { method: 'POST', body: JSON.stringify({ name: id }) }),
-  cancelDownload: (id) =>
-    req('/api/models/download/cancel', { method: 'POST', body: JSON.stringify({ name: id }) }),
-  deleteModel: (id) =>
-    req(`/api/models/library/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  loadModel: () => req('/api/models/load', { method: 'POST' }),
+  startDownload: (name) => post('/api/models/download', { name }),
+  cancelDownload: (name) => post('/api/models/download/cancel', { name }),
+  deleteModel: (id) => remove(`/api/models/library/${encodeURIComponent(id)}`),
+  loadModel: () => post('/api/models/load'),
 };
 
 /**
  * POST to /api/chat/stream and invoke onToken for each SSE token.
  * Returns the full assembled reply. Abort via AbortController signal.
  */
-export async function streamChat(content, { onToken, signal, revision, reasoningLevel = 'medium' } = {}) {
+export async function streamChat(content, { onToken, onTool, onReset, onMeta, onApproval, signal, revision, reasoningLevel = 'medium' } = {}) {
+  const now = new Date();
+  const currentDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   const res = await fetch(url('/api/chat/stream'), {
     method: 'POST',
     headers: { ...jsonHeaders(), Accept: 'text/event-stream' },
-    body: JSON.stringify({ content, revision, reasoning_level: reasoningLevel }),
+    body: JSON.stringify({ content, revision, reasoning_level: reasoningLevel, current_date: currentDate }),
     signal,
   });
   if (!res.ok) throw await responseError(res);
@@ -82,7 +86,13 @@ export async function streamChat(content, { onToken, signal, revision, reasoning
     if (!line.startsWith('data:')) return false;
     const payload = line.slice(5).trim();
     if (payload === '[DONE]') return true;
-    const { token, error } = JSON.parse(payload);
+    const { token, error, tool, reset, activity_message, work_seconds, approval, conversation, project, chats } = JSON.parse(payload);
+    if (conversation != null) onMeta?.({ conversation, project, chats });
+    if (approval) onApproval?.(approval);
+    if (tool) onTool?.(tool);
+    if (activity_message) onTool?.(activity_message);
+    if (work_seconds != null) onMeta?.({ work_seconds });
+    if (reset) { full = ''; onReset?.(); }
     if (error) throw new Error(error);
     if (token) {
       full += token;

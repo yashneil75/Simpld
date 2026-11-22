@@ -1,10 +1,12 @@
 import { CHECK } from './icons.jsx';
 
-export default function ModelMenu({ open, tiers, current, onSelect }) {
+export default function ModelMenu({ open, tiers, current, onSelect, label = 'Model', heading = 'Select model' }) {
   if (!open) return null;
   return (
-    <div className="model-menu menu" role="menu" aria-label="Model">
-      {tiers.map(({ name, label, description }) => (
+    <div className="model-menu menu selector-popover">
+      <div className="selector-heading">{heading}</div>
+      <div className="selector-model-list" role="menu" aria-label={label}>
+      {tiers.map(({ name, label }) => (
         <button
           key={name}
           type="button"
@@ -15,11 +17,11 @@ export default function ModelMenu({ open, tiers, current, onSelect }) {
         >
           <span className="opt-text">
             <span className="opt-name">{label}</span>
-            <span className="opt-desc">{description}</span>
           </span>
           {CHECK}
         </button>
       ))}
+      </div>
     </div>
   );
 }

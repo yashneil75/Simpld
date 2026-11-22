@@ -155,16 +155,7 @@ class Store:
                 ORDER BY c.id DESC
                 """
             ).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "created_at": row["created_at"],
-                "project": row["project"],
-            }
-            for row in rows
-            if row["title"]
-        ]
+        return [dict(row) for row in rows if row["title"]]
 
     def delete_conversation(self, conversation_id: int) -> None:
         """Drop a chat; its messages go with it through the foreign key."""

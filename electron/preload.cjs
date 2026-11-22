@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('electron', {
   platform: process.platform,
   openFolder: () => ipcRenderer.invoke('dialog:open-folder'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  openReleases: () => ipcRenderer.invoke('update:releases'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   getUpdateStatus: () => ipcRenderer.invoke('update:status'),
   onUpdateStatus: (callback) => {

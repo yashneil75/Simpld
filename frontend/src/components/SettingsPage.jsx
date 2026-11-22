@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, desktop } from '../api.js';
-import { BACK } from './icons.jsx';
+import { BACK, GEAR, SEARCH } from './icons.jsx';
 
-const tabs = ['General', 'Models'];
+const tabs = ['General', 'Models', 'Updates'];
 const runningDownload = new Set(['queued', 'downloading', 'cancelling']);
 
 function formatSize(bytes) {
@@ -119,7 +119,7 @@ function ModelCard({ model, library, system, busy, run, onUsed, confirm }) {
 }
 
 function UpdateSettings({ update }) {
-  if (!desktop.isElectron) return null;
+  const [checkError, setCheckError] = useState('');
   const message = ({
     checking: 'Checking for updates…',
     available: `Update ${update.version ?? ''} available`,
@@ -127,23 +127,33 @@ function UpdateSettings({ update }) {
     downloading: `Downloading update: ${update.progress}%`,
     ready: 'Update downloaded and ready to install.',
     failed: update.error,
+    preview: `Version ${update.version} is available. Install a release build to receive automatic updates.`,
   })[update.phase];
   return (
-    <div style={{ marginTop: 16 }}>
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>Updates</div>
-      {message && <div role="status" style={{ marginBottom: 6 }}>{message}</div>}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+    <section className="settings-section">
+      <h3>Software updates</h3>
+      <div className="setting-row">
+        <div><div className="setting-title">Simpld desktop{update.currentVersion ? ` · ${update.currentVersion}` : ''}</div>
+          <div className="settings-sub" role="status">{checkError || (desktop.isElectron ? (message || 'Check for the latest version of Simpld.') : 'Updates are available in the desktop app.')}</div>
+          {update.checkedAt && <div className="settings-sub">Last checked {new Date(update.checkedAt).toLocaleString()}</div>}
+        </div>
+      <div className="setting-actions">
         <button type="button" className="btn" disabled={['checking', 'available', 'downloading', 'ready'].includes(update.phase)}
-          onClick={() => window.electron.checkForUpdates().catch(console.error)}>
+          onClick={async () => {
+            setCheckError('');
+            try { await window.electron.checkForUpdates(); } catch (err) { setCheckError(err.message); }
+          }} hidden={!desktop.isElectron}>
           Check for updates
         </button>
+        {update.phase === 'preview' && <button type="button" className="btn" onClick={() => window.electron.openReleases().catch((err) => setCheckError(err.message))}>View release</button>}
         {update.phase === 'ready' && (
-          <button type="button" className="btn" onClick={() => window.electron.installUpdate().catch(console.error)}>
+          <button type="button" className="btn" onClick={() => window.electron.installUpdate().catch((err) => setCheckError(err.message))}>
             Install update
           </button>
         )}
       </div>
-    </div>
+      </div>
+    </section>
   );
 }
 
@@ -156,6 +166,7 @@ export default function SettingsPage({
   const [actionError, setActionError] = useState('');
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     if (tab !== 'Models') return;
@@ -204,12 +215,28 @@ export default function SettingsPage({
   }
 
   return (
-    <div className="pane">
+    <>
+    <aside className="sidebar settings-sidebar">
+      <div className="settings-sidebar-top">
+        <span>Settings</span>
+        <button type="button" className="side-icon" aria-label="Back to chat" title="Back to chat" onClick={onClose}>{BACK}</button>
+      </div>
+      <label className="settings-search">{SEARCH}<input aria-label="Search settings" placeholder="Search settings..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+      <nav className="settings-navigation" aria-label="Settings">
+        {['Preferences', 'Local AI', 'Application'].map((group, index) => {
+          const name = tabs[index];
+          if (query && !`${group} ${name}`.toLowerCase().includes(query.toLowerCase())) return null;
+          return <div key={group} className="settings-nav-group"><div className="settings-nav-label">{group}</div>
+            <button type="button" className={`side-item${tab === name ? ' is-active' : ''}`} aria-current={tab === name ? 'page' : undefined} onClick={() => onTabChange(name)}>
+              {name === 'General' ? GEAR : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{name === 'Models' ? <><rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"/></> : <><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 13 2M5 16a8 8 0 0 0 13 2"/></>}</svg>}
+              <span>{name}</span>
+            </button></div>;
+        })}
+        {query && !tabs.some((name, index) => `${['Preferences', 'Local AI', 'Application'][index]} ${name}`.toLowerCase().includes(query.toLowerCase())) && <div className="side-empty">No matching settings</div>}
+      </nav>
+    </aside>
+    <div className="pane settings-pane">
       <div className="bar settings-bar">
-        <button type="button" className="bar-link" onClick={onClose}>
-          {BACK}
-          <span>Settings</span>
-        </button>
         <div className={`bar-drag${desktop.isElectron ? ' draggable' : ''}`} />
       </div>
       <div className="settings-page">
@@ -217,17 +244,9 @@ export default function SettingsPage({
           <div>
             <h2>{tab}</h2>
             <div className="settings-sub">
-              {tab === 'Models' ? 'Choose, download and manage local models.' : 'App behaviour and updates.'}
+              {tab === 'Models' ? 'Choose, download and manage local models.' : tab === 'Updates' ? 'Keep your desktop app up to date.' : 'Make Simpld feel right for you.'}
             </div>
           </div>
-        </div>
-        <div className="settings-tabs">
-          {tabs.map((name) => (
-            <button key={name} type="button" className={`settings-tab${tab === name ? ' is-active' : ''}`}
-              aria-pressed={tab === name} onClick={() => onTabChange(name)}>
-              {name}
-            </button>
-          ))}
         </div>
         <div className="settings-page-body">
           {error && <div className="error-bubble" role="alert">{error}</div>}
@@ -251,17 +270,21 @@ export default function SettingsPage({
                 ))}
               </div>
             </>
-          ) : (
+          ) : tab === 'Updates' ? <UpdateSettings update={update} /> : (
             <div className="settings-general">
-              <label className="ask-opt">
-                <input type="checkbox" checked={!confirmDelete} onChange={(event) => onToggleConfirmDelete(!event.target.checked)} />
-                Don't ask before deleting chats or projects
-              </label>
+              <section className="settings-section">
+                <h3>Preferences</h3>
+                <label className="setting-row setting-toggle-row">
+                  <div><div className="setting-title">Confirm before deleting</div><div className="settings-sub">Ask before deleting a chat or project.</div></div>
+                  <input className="settings-switch" type="checkbox" role="switch" checked={confirmDelete} onChange={(event) => onToggleConfirmDelete(event.target.checked)} />
+                </label>
+              </section>
               <UpdateSettings update={update} />
             </div>
           )}
         </div>
       </div>
     </div>
+    </>
   );
 }

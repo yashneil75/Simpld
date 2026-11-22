@@ -17,6 +17,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const net = require('node:net');
 const fs = require('node:fs');
+const { latestRelease } = require('./github-release.cjs');
 
 const isDev = !app.isPackaged;
 
@@ -80,14 +81,15 @@ function startBackend(port) {
     SIMPLD_BACKEND_TOKEN: backendToken,
   };
   const bin = backendBin();
-  if (bin) {
-    console.log(`starting backend: ${bin}`);
-    backendProc = spawn(bin, [], { env, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
-  } else {
-    const py = process.platform === 'win32' ? 'python' : 'python3';
-    console.log(`starting backend: ${py} -m backend.app`);
-    backendProc = spawn(py, ['-m', 'backend.app'], { cwd: projectRoot, env, stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true });
-  }
+  const command = bin || (process.platform === 'win32' ? 'python' : 'python3');
+  const args = bin ? [] : ['-m', 'backend.app'];
+  console.log(`starting backend: ${[command, ...args].join(' ')}`);
+  backendProc = spawn(command, args, {
+    ...(bin ? {} : { cwd: projectRoot }),
+    env,
+    stdio: ['pipe', bin ? 'ignore' : 'inherit', bin ? 'ignore' : 'inherit'],
+    windowsHide: true,
+  });
   backendProc.once('close', () => { backendProc = null; });
   backendProc.on('error', (err) => console.error('backend failed to start:', err));
   backendProc.stdin.on('error', (err) => {
@@ -161,10 +163,10 @@ ipcMain.handle('dialog:open-folder', async () => {
   return res.filePaths[0];
 });
 
-let updateStatus = { phase: 'idle' };
+let updateStatus = { phase: 'idle', currentVersion: app.getVersion() };
 
 function publishUpdate(phase, fields = {}) {
-  updateStatus = { phase, ...fields };
+  updateStatus = { currentVersion: app.getVersion(), checkedAt: updateStatus.checkedAt, phase, ...fields };
   mainWindow?.webContents.send('update:status', updateStatus);
 }
 
@@ -172,6 +174,13 @@ async function checkForUpdates() {
   if (['checking', 'available', 'downloading', 'ready'].includes(updateStatus.phase)) return;
   publishUpdate('checking');
   try {
+    if (isDev) {
+      const release = await latestRelease(app.getVersion());
+      publishUpdate(release.newer ? 'preview' : 'current', {
+        version: release.version, checkedAt: new Date().toISOString(),
+      });
+      return;
+    }
     const result = await autoUpdater.checkForUpdates();
     if (result === null && updateStatus.phase === 'checking') {
       publishUpdate('failed', { error: 'Updates are available in packaged builds.' });
@@ -183,6 +192,7 @@ async function checkForUpdates() {
 
 ipcMain.handle('update:status', () => updateStatus);
 ipcMain.handle('update:check', checkForUpdates);
+ipcMain.handle('update:releases', () => shell.openExternal('https://github.com/yashneil75/Simpld/releases/latest'));
 ipcMain.handle('update:install', () => {
   if (updateStatus.phase === 'ready') autoUpdater.quitAndInstall();
 });
@@ -205,14 +215,18 @@ if (ownsInstance) app.whenReady().then(async () => {
   // Auto-update from GitHub Releases (published by the release workflow).
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('update-available', (info) => publishUpdate('available', { version: info.version }));
-  autoUpdater.on('update-not-available', () => publishUpdate('current'));
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.allowDowngrade = false;
+  autoUpdater.on('update-available', (info) => publishUpdate('available', { version: info.version, checkedAt: new Date().toISOString() }));
+  autoUpdater.on('update-not-available', () => publishUpdate('current', { checkedAt: new Date().toISOString() }));
   autoUpdater.on('download-progress', (info) => publishUpdate('downloading', {
     version: updateStatus.version, progress: Math.round(info.percent),
   }));
   autoUpdater.on('update-downloaded', (info) => publishUpdate('ready', { version: info.version }));
   autoUpdater.on('error', (err) => publishUpdate('failed', { error: err.message }));
-  if (!isDev) void checkForUpdates();
+  void checkForUpdates();
+  const updateTimer = setInterval(() => void checkForUpdates(), 4 * 60 * 60 * 1000);
+  updateTimer.unref();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(backendPort);

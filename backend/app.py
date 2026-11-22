@@ -17,6 +17,8 @@ import os
 import secrets
 import sys
 import threading
+import time
+from datetime import date
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +32,7 @@ from pydantic import BaseModel
 
 from backend import config, download as download_mod
 from backend.model import Phase, manager
+from backend.tool_chat import events as tool_events
 from backend.store import Store
 
 log = logging.getLogger("simpld.backend")
@@ -82,6 +85,14 @@ class ChatRun:
     messages: list[dict]
     reasoning_level: str = "medium"
     finished: asyncio.Event = field(default_factory=asyncio.Event)
+    tool_runs: list[dict] = field(default_factory=list)
+    tool_history: list[dict] = field(default_factory=list)
+    started_at: float = field(default_factory=time.monotonic)
+    current_date: str | None = None
+    work_seconds: float = 0
+    project: str = ""
+    permission_mode: str = "read_only"
+    approvals: dict = field(default_factory=dict)
 
 
 _active_chat: ChatRun | None = None
@@ -102,6 +113,7 @@ class ChatBody(BaseModel):
     content: str
     revision: int | None = None
     reasoning_level: Literal["low", "medium", "xhigh"] = "medium"
+    current_date: date | None = None
 
 
 class SelectModelBody(BaseModel):
@@ -110,6 +122,10 @@ class SelectModelBody(BaseModel):
 
 class SettingBody(BaseModel):
     value: Any
+
+
+class ApprovalBody(BaseModel):
+    allow: bool
 
 
 # --- helpers ---------------------------------------------------------------
@@ -146,6 +162,9 @@ def _begin_chat(body: ChatBody) -> ChatRun:
             _conversation = store.new_conversation(_project)
         store.append(_conversation, {"role": "user", "content": text})
         _active_chat = ChatRun(_conversation, store.load(_conversation), body.reasoning_level)
+        _active_chat.project = _project
+        _active_chat.permission_mode = _setting("permission_mode", "read_only")
+        _active_chat.current_date = body.current_date.isoformat() if body.current_date else date.today().isoformat()
         return _active_chat
 
 
@@ -153,9 +172,24 @@ def _finish_chat(run: ChatRun, reply: str) -> None:
     global _active_chat
     with _state_lock:
         try:
-            if run.conversation is not None and reply:
-                store.append(run.conversation, {"role": "assistant", "content": reply})
+            if run.conversation is not None and (reply or run.tool_runs):
+                run.work_seconds = max(0, time.monotonic() - run.started_at)
+                message = {"role": "assistant", "content": reply, "work_seconds": run.work_seconds}
+                if run.tool_runs:
+                    for entry in run.tool_runs:
+                        if entry["status"] in {"running", "awaiting_permission"}:
+                            entry["status"] = "cancelled"
+                    completed = {item.get("tool_call_id") for item in run.tool_history if item["role"] == "tool"}
+                    missing = [call for item in run.tool_history for call in item.get("tool_calls", []) if call["id"] not in completed]
+                    for call in missing:
+                        run.tool_history.append({"role": "tool", "tool_call_id": call["id"], "name": call["function"]["name"], "content": '{"error": "Tool run stopped before completion."}'})
+                    message.update(tool_runs=run.tool_runs, tool_history=run.tool_history)
+                store.append(run.conversation, message)
         finally:
+            for decision in run.approvals.values():
+                if not decision.done():
+                    decision.cancel()
+            run.approvals.clear()
             _active_chat = None
             run.finished.set()
 
@@ -163,6 +197,10 @@ def _finish_chat(run: ChatRun, reply: str) -> None:
 def _setting(key: str, default):
     stored = store.setting(key)
     return default if stored is None else json.loads(stored)
+
+
+def _projects() -> list[dict]:
+    return [{"path": path, "name": Path(path).name or path} for path in store.projects()]
 
 
 # --- routes ----------------------------------------------------------------
@@ -216,10 +254,14 @@ async def get_models() -> dict:
 
 @app.post("/api/models/select")
 async def select_model(body: SelectModelBody) -> dict:
+    if _active_chat is not None:
+        raise HTTPException(status_code=409, detail="Wait for the current response before switching models.")
     try:
-        return manager.select(body.name)
+        return await manager.select(body.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/models/load")
@@ -278,10 +320,7 @@ def get_projects() -> dict:
     return {
         "current": project,
         "workspace": str(config.WORKSPACE),
-        "projects": [
-            {"path": path, "name": Path(path).name or path}
-            for path in store.projects()
-        ],
+        "projects": _projects(),
     }
 
 
@@ -323,7 +362,7 @@ def _session_snapshot() -> dict:
             "revision": _session_revision,
             "currentProject": _project,
             "workspace": str(config.WORKSPACE),
-            "projects": [{"path": path, "name": Path(path).name or path} for path in store.projects()],
+            "projects": _projects(),
             "currentChat": _conversation,
             "messages": store.load(_conversation) if _conversation is not None else [],
             "chats": store.summaries(),
@@ -378,13 +417,25 @@ def delete_chat(conversation_id: int) -> dict:
 
 @app.get("/api/settings")
 def get_settings() -> dict:
-    return {"confirm_delete": _setting("confirm_delete", True)}
+    return {"confirm_delete": _setting("confirm_delete", True), "permission_mode": _setting("permission_mode", "read_only")}
 
 
 @app.put("/api/settings/{key}")
 def put_setting(key: str, body: SettingBody) -> dict:
+    if key == "permission_mode" and body.value not in ("read_only", "accept_edits", "allow_all"):
+        raise HTTPException(status_code=400, detail="Invalid permission mode.")
     store.set_setting(key, json.dumps(body.value))
     return {"key": key, "value": body.value}
+
+
+@app.post("/api/permissions/{approval_id}")
+async def decide_permission(approval_id: str, body: ApprovalBody) -> dict:
+    run = _active_chat
+    decision = run.approvals.get(approval_id) if run else None
+    if decision is None or decision.done():
+        raise HTTPException(status_code=409, detail="This permission request is no longer active.")
+    decision.set_result(body.allow)
+    return {"id": approval_id, "allowed": body.allow}
 
 
 @app.post("/api/chat")
@@ -393,15 +444,18 @@ async def chat(body: ChatBody) -> dict:
     conversation = run.conversation
     parts = []
     try:
-        async with aclosing(manager.tokens(run.messages, reasoning_level=run.reasoning_level)) as tokens:
-            async for token in tokens:
-                parts.append(token)
+        async with aclosing(tool_events(manager, run.messages, run.reasoning_level, run.tool_runs, run.tool_history, run.current_date, run.project, run.permission_mode)) as events:
+            async for event in events:
+                if event.get("reset"):
+                    parts.clear()
+                if "token" in event:
+                    parts.append(event["token"])
     except Exception as exc:
         log.exception("chat failed")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         _finish_chat(run, "".join(parts))
-    return {"reply": "".join(parts), "conversation": conversation}
+    return {"reply": "".join(parts), "conversation": conversation, "tool_runs": run.tool_runs, "work_seconds": run.work_seconds}
 
 
 class ChatResponse(StreamingResponse):
@@ -424,10 +478,15 @@ async def chat_stream(body: ChatBody):
         parts = []
         error = None
         try:
-            async with aclosing(manager.tokens(run.messages, reasoning_level=run.reasoning_level)) as tokens:
-                async for token in tokens:
-                    parts.append(token)
-                    yield f"data: {json.dumps({'token': token})}\n\n"
+            chats = await asyncio.to_thread(store.summaries)
+            yield f"data: {json.dumps({'conversation': run.conversation, 'project': run.project, 'chats': chats})}\n\n"
+            async with aclosing(tool_events(manager, run.messages, run.reasoning_level, run.tool_runs, run.tool_history, run.current_date, run.project, run.permission_mode, run.approvals)) as events:
+                async for event in events:
+                    if event.get("reset"):
+                        parts.clear()
+                    if "token" in event:
+                        parts.append(event["token"])
+                    yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
             log.exception("chat stream failed")
             error = str(exc)
@@ -435,6 +494,7 @@ async def chat_stream(body: ChatBody):
             _finish_chat(run, "".join(parts))
         if error:
             yield f"data: {json.dumps({'error': error})}\n\n"
+        yield f"data: {json.dumps({'work_seconds': run.work_seconds})}\n\n"
         yield "data: [DONE]\n\n"
 
     return ChatResponse(event_stream(), media_type="text/event-stream")

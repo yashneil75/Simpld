@@ -1,58 +1,33 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import ToolActivity from './ToolActivity.jsx';
 
-// Reasoning markers vary by model family. Support the common variants so a
-// reply is split correctly regardless of which one the model emits.
-const OPEN_MARKERS = [
-  '<' + 'think' + '>',
-  '<' + 'think' + 'ing>',
-  '<' + 'thinking' + '>',
-];
-const CLOSE_MARKERS = [
-  '<' + '/' + 'think' + '>',
-  '<' + '/' + 'think' + 'ing>',
-  '<' + '/' + 'thinking' + '>',
-];
-
-function findEarliest(text, markers) {
-  let best = -1;
-  let marker = null;
-  for (const m of markers) {
-    const idx = text.indexOf(m);
-    if (idx !== -1 && (best === -1 || idx < best)) {
-      best = idx;
-      marker = m;
-    }
-  }
-  return { idx: best, marker };
-}
-
-function stripOpens(text) {
-  let out = text;
-  for (const m of OPEN_MARKERS) out = out.split(m).join('');
-  return out;
-}
+// A model may use either marker spelling, including across streamed chunks.
+const OPEN_MARKERS = ['<think>', '<thinking>'];
+const OPEN_MARKER = /<(?:think|thinking)>/;
+const CLOSE_MARKER = /<\/(?:think|thinking)>/;
 
 function splitThinking(content, isStreaming = false) {
-  const { idx: closeIdx, marker: closeMarker } = findEarliest(content, CLOSE_MARKERS);
-  if (closeIdx !== -1) {
-    const thinking = stripOpens(content.slice(0, closeIdx)).trim();
-    const answer = content.slice(closeIdx + closeMarker.length).trim();
+  const close = content.match(CLOSE_MARKER);
+  if (close) {
+    // Sequential passes also remove markers formed by removing nested markers.
+    const thinking = content.slice(0, close.index)
+      .replaceAll('<think>', '').replaceAll('<thinking>', '').replaceAll('<thinking>', '').trim();
+    const answer = content.slice(close.index + close[0].length).trim();
     return { thinking, answer, done: true };
   }
-  const { idx: openIdx, marker: openMarker } = findEarliest(content, OPEN_MARKERS);
-  if (openIdx !== -1) {
-    const thinking = content.slice(openIdx + openMarker.length).trim();
-    const answer = content.slice(0, openIdx).trim();
+  const open = content.match(OPEN_MARKER);
+  if (open) {
+    const thinking = content.slice(open.index + open[0].length).trim();
+    const answer = content.slice(0, open.index).trim();
     return { thinking, answer, done: false };
   }
-  // A marker can arrive across several streamed chunks.
   const text = content.trim();
   if (isStreaming && OPEN_MARKERS.some((marker) => marker.startsWith(text))) {
     return { thinking: '', answer: '', done: false };
   }
-  return { thinking: '', answer: content.trim(), done: true };
+  return { thinking: '', answer: text, done: true };
 }
 
 function Spinner() {
@@ -63,9 +38,31 @@ function TokPerSec({ tokPerSec }) {
   return <span className="tokps">{(tokPerSec || 0).toFixed(1)} tok/s</span>;
 }
 
-function Message({ role, content, streaming, tokPerSec }) {
+function activityFor(message) {
+  const runs = message.tool_runs || [];
+  if (runs.some((entry) => entry.type === 'message') || !message.tool_history?.length) return runs;
+  // Earlier chats already saved intermediate messages in model context.
+  const entries = [];
+  const used = new Set();
+  message.tool_history.forEach((entry, index) => {
+    if (entry.role !== 'assistant') return;
+    if (entry.content?.trim()) entries.push({ id: `history-${index}`, type: 'message', content: entry.content });
+    entry.tool_calls?.forEach((call) => {
+      const run = runs.find((item) => item.id === call.id);
+      if (run) { entries.push(run); used.add(run.id); }
+    });
+  });
+  return [...entries, ...runs.filter((run) => !used.has(run.id))];
+}
+
+function formatDuration(total) {
+  const seconds = Math.max(0, Math.floor(total));
+  const units = [[Math.floor(seconds / 3600), 'hour'], [Math.floor(seconds / 60) % 60, 'minute'], [seconds % 60, 'second']];
+  return units.filter(([value]) => value > 0).map(([value, unit]) => `${value} ${unit}${value === 1 ? '' : 's'}`).join(' ') || '0 seconds';
+}
+
+function Message({ role, content, streaming, tokPerSec, toolRuns = [], workSeconds }) {
   const copyBtn = useRef(null);
-  const [showThinking, setShowThinking] = useState(false);
 
   const copy = async () => {
     try {
@@ -87,38 +84,23 @@ function Message({ role, content, streaming, tokPerSec }) {
     );
   }
 
-  const { thinking, answer, done } = splitThinking(content, streaming);
-  const isThinking = streaming && !done;
+  const { thinking, answer } = splitThinking(content, streaming);
 
   return (
     <div className={`msg ${role}${streaming ? ' streaming' : ''}`}>
-      {thinking && (
-        <div className="thinking-block">
-          <button
-            type="button"
-            className="thinking-toggle"
-            aria-expanded={String(showThinking)}
-            onClick={() => setShowThinking((v) => !v)}
-          >
-            <span>{showThinking ? 'Hide thinking' : 'Show thinking'}</span>
-            {isThinking && <Spinner />}
-            {isThinking && <TokPerSec tokPerSec={tokPerSec} />}
-          </button>
-          {/* Reasoning renders unboxed and grayed out, like a margin note. */}
-          {showThinking && <div className="thinking-text">{thinking}</div>}
-        </div>
-      )}
+      <ToolActivity runs={toolRuns} thinking={thinking} streaming={streaming} />
       {answer && (
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
         }}>{answer}</ReactMarkdown>
       )}
-      {streaming && (!thinking || answer) && (
+      {streaming && (
         <div className="stream-spinner">
           <Spinner />
           <TokPerSec tokPerSec={tokPerSec} />
         </div>
       )}
+      {!streaming && workSeconds != null && <div className="worked-for">Worked for {formatDuration(workSeconds)}</div>}
       {!streaming && content && (
         <div className="actions">
           <button ref={copyBtn} type="button" data-copy aria-label="Copy" onClick={copy}>
@@ -136,7 +118,7 @@ function Message({ role, content, streaming, tokPerSec }) {
   );
 }
 
-export default function ChatThread({ messages, streamingText, tokPerSec }) {
+export default function ChatThread({ messages, streamingText, streamingTools = [], startedAt, workSeconds, tokPerSec }) {
   const ref = useRef(null);
   const stickToBottom = useRef(true);
 
@@ -147,30 +129,26 @@ export default function ChatThread({ messages, streamingText, tokPerSec }) {
   };
 
   useEffect(() => {
-    stickToBottom.current = true;
-  }, [messages.length]);
-
-  useEffect(() => {
     const el = ref.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages, streamingText]);
+  }, [messages, streamingText, streamingTools]);
 
-  const onScroll = () => {
+  const onScroll = (event) => {
+    if (event.target !== event.currentTarget) return;
     stickToBottom.current = isNearBottom();
   };
 
   const visible = messages.filter(
-    ({ role, content }) => (role === 'user' || role === 'assistant') && content,
+    ({ role, content, tool_runs }) => (role === 'user' || role === 'assistant') && (content || tool_runs?.length),
   );
+  const displayed = [...visible];
+  if (streamingText !== null) displayed.push({ role: 'assistant', content: streamingText, tool_runs: streamingTools, streaming: true, work_seconds: workSeconds, startedAt });
 
   return (
     <main ref={ref} className="thread" aria-live="polite" onScroll={onScroll}>
-      {visible.map((m, i) => (
-        <Message key={i} role={m.role} content={m.content} tokPerSec={tokPerSec} />
+      {displayed.map((m, i) => (
+        <Message key={i} role={m.role} content={m.content || ''} toolRuns={activityFor(m)} streaming={m.streaming} startedAt={m.startedAt} workSeconds={m.work_seconds} tokPerSec={tokPerSec} />
       ))}
-      {streamingText !== null && (
-        <Message role="assistant" content={streamingText} streaming tokPerSec={tokPerSec} />
-      )}
     </main>
   );
 }

@@ -39,6 +39,31 @@ class ModelTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime._load_task
         self.assertEqual(self.runtime.phase, Phase.READY)
 
+    async def test_switch_unloads_previous_model_and_loads_ornith(self):
+        await self.load()
+        status = await self.runtime.select("Ornith-1.5-9B")
+        self.llm.close.assert_called_once()
+        self.assertEqual(status["current"], "Ornith-1.5-9B")
+        self.assertEqual(status["phase"], Phase.UNLOADED)
+        await self.load()
+        self.assertEqual(self.factory.call_count, 2)
+
+    async def test_switch_rejects_unknown_models_and_busy_runtime(self):
+        with self.assertRaises(ValueError):
+            await self.runtime.select("unknown")
+        self.runtime.phase = Phase.LOADING
+        with self.assertRaises(RuntimeError):
+            await self.runtime.select("Ornith-1.5-9B")
+        self.assertEqual(self.runtime.name, config.DEFAULT_MODEL)
+
+    async def test_ornith_uses_its_sampling_without_effort_override(self):
+        await self.runtime.select("Ornith-1.5-9B")
+        self.llm.create_chat_completion.return_value = (chunk for chunk in [])
+        _ = [token async for token in self.runtime.tokens([{"role": "user", "content": "hello"}])]
+        self.assertNotIn("reasoning_effort", self.llm.chat_handler.keywords)
+        self.assertTrue(self.llm.chat_handler.keywords["enable_thinking"])
+        self.assertEqual(self.llm.create_chat_completion.call_args.kwargs["temperature"], 0.6)
+
     async def test_load_failure_is_retryable_with_one_worker(self):
         self.factory.side_effect = [RuntimeError("unsupported model"), self.llm]
         self.assertEqual(self.runtime.load_in_background()["phase"], Phase.LOADING)
@@ -178,6 +203,34 @@ class ModelTest(unittest.IsolatedAsyncioTestCase):
             reply = [token async for token in self.runtime.tokens([{"role": "user", "content": "prompt"}], reasoning_level=level)]
             self.assertEqual(reply, ["<think>\n</think>answer"])
             self.assertEqual(self.llm.tokenize.call_args.args[0], f"{level}|True|True".encode())
+
+    async def test_native_template_renders_saved_tool_arguments_as_mapping(self):
+        import copy
+        import json
+
+        self.llm.metadata['tokenizer.chat_template'] = (
+            '{% for message in messages %}{% for call in message.tool_calls|default([]) %}'
+            '{% for key, value in call.function.arguments|items %}{{ key }}={{ value }};{% endfor %}'
+            '{% endfor %}{% endfor %}'
+        )
+        self.llm.tokenize.return_value = [1]
+        self.llm.create_chat_completion.side_effect = lambda **kwargs: Llama.create_chat_completion(self.llm, **kwargs)
+
+        def completion(**_kwargs):
+            yield {'id': 'completion', 'created': 0, 'model': 'test', 'choices': [
+                {'text': '</think>answer', 'finish_reason': None, 'logprobs': None},
+            ]}
+        self.llm.create_completion.side_effect = completion
+        for arguments in [json.dumps({'path': 'file.txt', 'content': '\n  text\n'}), {'path': 'file.txt', 'content': '\n  text\n'}]:
+            history = [
+                {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call-1', 'type': 'function', 'function': {'name': 'write_file', 'arguments': arguments}}]},
+                {'role': 'tool', 'name': 'write_file', 'tool_call_id': 'call-1', 'content': '{"characters_written": 8}'},
+            ]
+            original = copy.deepcopy(history)
+            reply = [token async for token in self.runtime.tokens(history)]
+            self.assertEqual(reply, ['<think>\n</think>answer'])
+            self.assertEqual(self.llm.tokenize.call_args.args[0], b'path=file.txt;content=\n  text\n;')
+            self.assertEqual(history, original)
 
     async def test_cancelled_native_load_is_closed_before_shutdown_returns(self):
         entered, release = threading.Event(), threading.Event()

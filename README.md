@@ -87,6 +87,13 @@ For browser-only development, run `npm run backend` and
 
 ## API
 
+Chat can call `search_web` (DDGS search) and `web_fetch` (public webpage text).
+Tool definitions go through the model's native chat template; calls are parsed
+using Qwen Coder XML (`tool_call`, `function=`, `parameter=`). No additional
+call-format prompt is injected. Results feed back into generation, and the
+collapsible web activity list is saved with the assistant's reply. Each turn
+allows up to eight tool rounds, with four calls per round.
+
 - `GET /api/health`, `GET /api/models`, `POST /api/models/select`
 - `GET /api/projects`, `POST /api/projects/open`, `POST /api/projects/delete`
 - `GET /api/session`, `GET /api/history`, `GET /api/conversations`, `POST /api/conversations/new`

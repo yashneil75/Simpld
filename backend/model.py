@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from enum import StrEnum
@@ -42,14 +43,25 @@ class ModelManager:
             "loading": self.phase == Phase.LOADING,
             "mock": False,
             "tiers": [
-                {"name": name, "label": spec["label"], "description": spec["description"]}
+                {"name": name, "label": spec["label"], "description": spec["description"],
+                 "reasoning_levels": spec.get("reasoning_levels", list(config.REASONING_LEVELS))}
                 for name, spec in config.MODELS.items()
             ],
         }
 
-    def select(self, name: str) -> dict:
-        if name != self.name:
-            raise ValueError(f"Unknown model {name!r}. Available: {self.name}")
+    async def select(self, name: str) -> dict:
+        download.spec_for(name)
+        if name == self.name:
+            return self.status()
+        if self.phase in {Phase.LOADING, Phase.UNLOADING} or self._runtime_lock.locked():
+            raise RuntimeError("Wait for the current model operation or response to finish before switching models.")
+        self.phase = Phase.UNLOADING
+        try:
+            async with self._runtime_lock:
+                await self._run(self._close_runtime)
+                self.name = name
+        finally:
+            self.phase, self.error = Phase.UNLOADED, None
         return self.status()
 
     def load_in_background(self) -> dict:
@@ -120,19 +132,34 @@ class ModelManager:
             self.error = str(exc) or "The model could not be loaded."
             self.phase = Phase.FAILED
 
-    async def tokens(self, messages: list[dict], reasoning_level: str = "medium"):
+    async def tokens(self, messages: list[dict], reasoning_level: str = "medium", tools=None):
         if reasoning_level not in config.REASONING_LEVELS:
             raise ValueError("Unknown reasoning level.")
         self.load_in_background()
         if self.phase == Phase.LOADING:
             await asyncio.shield(self._load_task)
         history = [
-            {"role": message["role"], "content": message["content"]}
+            {key: value for key, value in message.items() if key in {"role", "content", "tool_calls", "tool_call_id", "name"}}
             for message in messages
-            if message.get("role") in {"system", "user", "assistant"}
+            if message.get("role") in {"system", "user", "assistant", "tool"}
+            and (message.get("role") != "tool" or message.get("tool_call_id"))
             and isinstance(message.get("content"), str)
         ]
         for message in history:
+            if message['role'] == 'assistant' and message.get('tool_calls'):
+                calls = []
+                for call in message['tool_calls']:
+                    function = dict(call['function'])
+                    arguments = function.get('arguments', {})
+                    # Qwen's native Jinja template iterates arguments.items().
+                    # Stored/OpenAI tool calls encode these as JSON strings.
+                    if isinstance(arguments, str):
+                        arguments = json.loads(arguments)
+                    if not isinstance(arguments, dict):
+                        raise ValueError('Tool call arguments must be a JSON object.')
+                    function['arguments'] = arguments
+                    calls.append({**call, 'function': function})
+                message['tool_calls'] = calls
             if message["role"] == "assistant" and message["content"].startswith("<think>"):
                 reasoning, separator, answer = message["content"][len("<think>"):].partition("</think>")
                 message["reasoning_content"] = reasoning.strip()
@@ -146,12 +173,15 @@ class ModelManager:
                 nonlocal stream
                 # create_chat_completion has no chat_template_kwargs parameter.
                 # Bind native template variables through its supported handler API.
-                self._llm.chat_handler = partial(
-                    self._chat_handler, reasoning_effort=reasoning_level,
-                    enable_thinking=True, preserve_thinking=True,
-                )
+                spec = config.MODELS[self.name]
+                template_options = {"enable_thinking": True, "preserve_thinking": True}
+                if spec.get("reasoning_levels", config.REASONING_LEVELS):
+                    template_options["reasoning_effort"] = reasoning_level
+                self._llm.chat_handler = partial(self._chat_handler, **template_options)
                 stream = self._llm.create_chat_completion(
                     messages=history, stream=True, max_tokens=4096,
+                    **spec.get("sampling", {}),
+                    **({"tools": tools} if tools else {}),
                 )
 
             try:
@@ -174,7 +204,9 @@ class ModelManager:
                     await self._run(stream.close)
 
     async def delete_weights(self, name: str) -> bool:
-        self.select(name)
+        download.spec_for(name)
+        if name != self.name:
+            return await asyncio.to_thread(download.delete, name)
         if self.phase in {Phase.LOADING, Phase.UNLOADING}:
             raise RuntimeError("Wait for the model operation to finish before deleting it.")
         self.phase = Phase.UNLOADING

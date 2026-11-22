@@ -1,4 +1,4 @@
-import { BIN, CHECK, FOLDER } from './icons.jsx';
+import { BIN, CHECK } from './icons.jsx';
 
 export default function ProjectMenu({
   open,

@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar.jsx';
 import TopBar from './components/TopBar.jsx';
 import ProjectMenu from './components/ProjectMenu.jsx';
 import ModelMenu from './components/ModelMenu.jsx';
+import EffortMenu from './components/EffortMenu.jsx';
 import ChatThread from './components/ChatThread.jsx';
 import Composer from './components/Composer.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
@@ -10,11 +11,27 @@ import SettingsPage from './components/SettingsPage.jsx';
 import { api, desktop, streamChat } from './api.js';
 
 const idle = { phase: 'idle' };
+const permissionOptions = [
+  { name: 'read_only', label: 'Read only' },
+  { name: 'accept_edits', label: 'Accept Edits' },
+  { name: 'allow_all', label: 'Allow all' },
+];
+const reasoningOptions = [
+  { name: 'low', label: 'Low' },
+  { name: 'medium', label: 'Medium' },
+  { name: 'xhigh', label: 'Extra high' },
+];
 
 function replyReducer(state, event) {
   switch (event.type) {
     case 'start':
-      return state.phase === 'idle' ? { phase: 'streaming', text: '', rate: 0 } : state;
+      return state.phase === 'idle' ? { phase: 'streaming', text: '', rate: 0, tools: [], startedAt: Date.now(), conversation: event.conversation, project: event.project, revision: event.revision } : state;
+    case 'tool':
+      return state.phase === 'idle' ? state : { ...state, tools: state.tools.some((tool) => tool.id === event.tool.id) ? state.tools.map((tool) => tool.id === event.tool.id ? event.tool : tool) : [...state.tools, event.tool] };
+    case 'meta':
+      return state.phase === 'idle' ? state : { ...state, ...(event.conversation != null ? { conversation: event.conversation, project: event.project } : {}), ...(event.work_seconds != null ? { workSeconds: event.work_seconds } : {}) };
+    case 'reset':
+      return state.phase === 'idle' ? state : { ...state, text: '' };
     case 'token':
       return state.phase === 'streaming' ? { ...state, text: event.text, rate: event.rate } : state;
     case 'stop':
@@ -41,6 +58,9 @@ export default function App() {
   const [menu, setMenu] = useState(null);
   const [settingsTab, setSettingsTab] = useState(null);
   const [input, setInput] = useState('');
+  const [permissionMode, setPermissionMode] = useState('read_only');
+  const [approval, setApproval] = useState(null);
+  const [deciding, setDeciding] = useState(false);
   const [reasoningLevel, setReasoningLevel] = useState(() => {
     try {
       const stored = localStorage.getItem('simpld.reasoningLevel');
@@ -55,10 +75,12 @@ export default function App() {
   const [error, setError] = useState('');
   const stream = useRef(null);
   const navigation = useRef(null);
+  const navigationVersion = useRef(0);
   const askResolve = useRef(null);
 
   useEffect(() => {
     const controller = new AbortController();
+    controller.conversation = session.currentChat;
     async function connect() {
       for (let attempt = 0; attempt < 60 && !controller.signal.aborted; attempt += 1) {
         try {
@@ -67,6 +89,7 @@ export default function App() {
           ]);
           if (controller.signal.aborted) return;
           setConfirmDelete(settings.confirm_delete);
+          setPermissionMode(settings.permission_mode || 'read_only');
           setCatalog(models);
           setSession(snapshot);
           setStartup('ready');
@@ -119,6 +142,7 @@ export default function App() {
   const stopStream = () => {
     if (!stream.current) return;
     dispatchReply({ type: 'stop' });
+    setApproval(null);
     stream.current.abort();
   };
 
@@ -135,13 +159,34 @@ export default function App() {
     setError('');
     setSession((current) => ({ ...current, messages: [...current.messages, prompt] }));
     setInput('');
-    dispatchReply({ type: 'start' });
+    dispatchReply({ type: 'start', conversation: session.currentChat, project: session.currentProject, revision: session.revision });
 
     try {
       await streamChat(text, {
         reasoningLevel,
         revision: session.revision,
         signal: controller.signal,
+        onTool: (tool) => {
+          if (stream.current === controller) dispatchReply({ type: 'tool', tool });
+        },
+        onApproval: (request) => {
+          if (stream.current === controller) { setApproval(request); setSettingsTab(null); }
+        },
+        onMeta: (meta) => {
+          if (stream.current !== controller) return;
+          if (meta.conversation != null) {
+            controller.conversation = meta.conversation;
+            setSession((current) => ({
+              ...current,
+              ...(meta.chats ? { chats: meta.chats } : {}),
+              ...(current.revision === session.revision && current.currentProject === meta.project ? { currentChat: meta.conversation } : {}),
+            }));
+          }
+          dispatchReply({ type: 'meta', ...meta });
+        },
+        onReset: () => {
+          if (stream.current === controller) { partial = ''; dispatchReply({ type: 'reset' }); }
+        },
         onToken: (_token, assembled) => {
           if (stream.current !== controller) return;
           partial = assembled;
@@ -158,7 +203,15 @@ export default function App() {
 
     if (stream.current !== controller) return;
     try {
-      const snapshot = await api.session(undefined, controller.signal.aborted);
+      // Navigation and stream completion can finish in either order. Refresh
+      // after the latest navigation so an older snapshot cannot replace it.
+      let snapshot;
+      for (;;) {
+        if (navigation.current) await navigation.current;
+        const version = navigationVersion.current;
+        snapshot = await api.session(undefined, controller.signal.aborted);
+        if (version === navigationVersion.current && !navigation.current) break;
+      }
       if (stream.current !== controller) return;
       setSession(snapshot);
       if (failure && snapshot.revision === session.revision && snapshot.messages.length === session.messages.length) {
@@ -168,13 +221,14 @@ export default function App() {
       if (stream.current !== controller) return;
       if (partial) {
         setSession((current) => ({
-          ...current, messages: [...current.messages, { role: 'assistant', content: partial }],
+          ...current, messages: current.currentChat === controller.conversation ? [...current.messages, { role: 'assistant', content: partial }] : current.messages,
         }));
       }
       failure ||= err.message;
     } finally {
       if (stream.current === controller) {
         stream.current = null;
+        setApproval(null);
         if (failure) setError(failure);
         dispatchReply({ type: 'finish' });
       }
@@ -183,11 +237,7 @@ export default function App() {
 
   function navigate(action, { clearDraft = true } = {}) {
     if (startup !== 'ready') return;
-    if (stream.current) {
-      stream.current.abort();
-      stream.current = null;
-      dispatchReply({ type: 'finish' });
-    }
+    navigationVersion.current += 1;
     setNavigating(true);
     setMenu(null);
     setError('');
@@ -267,10 +317,33 @@ export default function App() {
     }
   }
 
+  async function changePermissionMode(value) {
+    setMenu(null);
+    try {
+      await api.setSetting('permission_mode', value);
+      setPermissionMode(value);
+    } catch (err) { setError(err.message); }
+  }
+
+  async function decidePermission(allow) {
+    if (!approval || deciding) return;
+    setDeciding(true);
+    try {
+      await api.decidePermission(approval.id, allow);
+      setApproval(null);
+    } catch (err) {
+      setError(err.message);
+      setApproval(null);
+      stopStream();
+    } finally { setDeciding(false); }
+  }
+
   const { messages, chats, currentChat, projects, currentProject, workspace } = session;
   const model = catalog?.tiers.find((item) => item.name === catalog.current);
+  const hasEffort = !model?.reasoning_levels || model.reasoning_levels.length > 0;
   const projectName = projects.find((project) => project.path === currentProject)?.name ?? currentProject;
-  const isHero = messages.length === 0 && reply.phase === 'idle';
+  const viewingReply = reply.phase !== 'idle' && reply.project === currentProject && (reply.conversation != null ? reply.conversation === currentChat : reply.revision === session.revision);
+  const isHero = messages.length === 0 && !viewingReply;
   const projectOpen = menu === 'project';
   const modelOpen = menu === 'model';
 
@@ -278,7 +351,7 @@ export default function App() {
     <div className="app" onClick={(event) => {
       if (!event.target.closest('.model, .project')) setMenu(null);
     }}>
-      <Sidebar
+      {!settingsTab && <Sidebar
         chats={chats}
         current={currentChat}
         projectList={projects}
@@ -288,7 +361,7 @@ export default function App() {
         onOpenSettings={() => setSettingsTab('General')}
         onBrowse={browseForFolder}
         update={update}
-      />
+      />}
 
       {settingsTab ? (
         <SettingsPage
@@ -320,7 +393,7 @@ export default function App() {
               />
             }
           />
-          {!isHero && <ChatThread key={session.revision} messages={messages} streamingText={reply.text ?? null} tokPerSec={reply.rate ?? 0} />}
+          {!isHero && <ChatThread key={currentChat ?? session.revision} messages={messages} streamingText={viewingReply ? reply.text ?? '' : null} streamingTools={viewingReply ? reply.tools || [] : []} startedAt={reply.startedAt} workSeconds={reply.workSeconds} tokPerSec={reply.rate ?? 0} />}
           {error && (
             <div className="dock" style={{ paddingBottom: 0 }}>
               <div className="error-bubble" role="alert">{error}</div>
@@ -329,6 +402,14 @@ export default function App() {
 
           <div className="dock">
             <h1 className="hero">What next?</h1>
+            {approval && <section className="permission-card" role="region" aria-label="Permission request" aria-live="polite">
+              <div className="permission-heading">Allow {approval.name.replaceAll('_', ' ')}?</div>
+              <div className="permission-project">{approval.project}</div>
+              <pre>{approval.arguments.command || approval.arguments.path || JSON.stringify(approval.arguments, null, 2)}</pre>
+              {approval.arguments.content != null && <pre className="permission-preview">{approval.arguments.content}</pre>}
+              {approval.arguments.old_text != null && <div className="permission-diff"><pre className="permission-old">{approval.arguments.old_text}</pre><pre className="permission-new">{approval.arguments.new_text}</pre></div>}
+              <div className="permission-actions"><span>Allow this action once</span><button type="button" disabled={deciding} onClick={() => decidePermission(false)}>Deny</button><button type="button" className="permission-allow" disabled={deciding} onClick={() => decidePermission(true)}>Allow</button></div>
+            </section>}
             <Composer
               value={input}
               onChange={setInput}
@@ -338,41 +419,34 @@ export default function App() {
               onStop={stopStream}
             />
             <div className="meta">
-              {model && (
-                <div className="model">
-                  <button
-                    type="button"
-                    className="model-trigger"
-                    aria-haspopup="menu"
-                    aria-expanded={modelOpen}
-                    onClick={() => setMenu(modelOpen ? null : 'model')}
-                  >
-                    <span>{model.label}</span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                  </button>
-                  <ModelMenu open={modelOpen} tiers={catalog.tiers} current={model.name} onSelect={selectModel} />
-                </div>
-              )}
-              <label className="reasoning-control">
-                <span>Reasoning</span>
-                <select
-                  aria-label="Reasoning level"
-                  title="How thoroughly the model should reason before answering"
-                  value={reasoningLevel}
+              <div className="model">
+                <button type="button" className="model-trigger" aria-label={`Tool permissions: ${permissionOptions.find((option) => option.name === permissionMode)?.label}`} title="Select permissions" aria-haspopup="menu" aria-expanded={menu === 'permissions'} disabled={reply.phase !== 'idle' || startup !== 'ready'} onClick={() => setMenu(menu === 'permissions' ? null : 'permissions')}>
+                  <span>{permissionOptions.find((option) => option.name === permissionMode)?.label}</span>
+                </button>
+                <ModelMenu open={menu === 'permissions'} tiers={permissionOptions} current={permissionMode} onSelect={changePermissionMode} label="Tool permissions" heading="Select permissions" />
+              </div>
+              <div className="model">
+                <button
+                  type="button"
+                  className="model-trigger"
+                  aria-label={`${model?.label || 'Select model'}${hasEffort ? `, ${reasoningOptions.find((option) => option.name === reasoningLevel)?.label} effort` : ''}`}
+                  title="Select model and effort"
+                  aria-haspopup="dialog"
+                  aria-expanded={menu === 'reasoning' || modelOpen}
                   disabled={reply.phase !== 'idle'}
-                  onChange={(event) => {
-                    const level = event.target.value;
+                  onClick={() => setMenu(menu === 'reasoning' || modelOpen ? null : hasEffort ? 'reasoning' : 'model')}
+                >
+                  <span>{model?.label || 'Select model'} {hasEffort && <span style={{ color: 'var(--muted)' }}>{reasoningOptions.find((option) => option.name === reasoningLevel)?.label}</span>}</span>
+                </button>
+                {model && <ModelMenu open={modelOpen} tiers={catalog.tiers} current={model.name} onSelect={selectModel} />}
+                <EffortMenu open={hasEffort && menu === 'reasoning' && reply.phase === 'idle'} options={reasoningOptions} value={reasoningLevel} modelLabel={model?.label}
+                  onSelectModel={() => setMenu('model')}
+                  onChange={(level) => {
                     setReasoningLevel(level);
                     try { localStorage.setItem('simpld.reasoningLevel', level); } catch { /* Storage may be unavailable. */ }
                   }}
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="xhigh">Extra high</option>
-                </select>
-              </label>
+                />
+              </div>
             </div>
           </div>
         </div>
