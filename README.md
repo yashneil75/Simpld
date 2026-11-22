@@ -21,8 +21,8 @@ Simpld-Desktop/
 npm run dist
 ```
 
-This builds the frontend, freezes the Python backend, downloads the Unsloth
-llama.cpp build b12588-mix-c0c3de8, and packages the app into `release/`.
+This builds the frontend, freezes the Python backend, downloads the mainline
+llama.cpp build b12633, and packages the app into `release/`.
 
 - `Simpld-0.1.0-setup.exe` — installer (Start Menu shortcut, uninstaller)
 - `Simpld-0.1.0-portable.exe` — single file, runs anywhere
@@ -31,13 +31,14 @@ Double-click either to open Simpld. The frozen backend and llama.cpp
 runtime stop when the app quits. Launching again focuses the existing window.
 
 The installer includes the llama.cpp runtime. Open **Settings → Models** to
-download **Kintsugi 27B** (UD-IQ3_XXS, 11.66 GB). You can also run this command.
+download **Qwen 3.8 27B** (IQ3_XXS, 10.44 GB). You can also run this command.
 
 ```
 python -m backend.download Kintsugi-27b
 ```
 
-Simpld uses an 8,192-token context for text chat. Weights and chats live in
+Simpld uses a 131,072-token (128K) context for text chat with Q4 KV caching.
+Weights and chats live in
 `%USERPROFILE%\.simpld` on Windows and `~/.simpld` on macOS and Linux. Existing
 model files remain on disk when you upgrade.
 
@@ -46,8 +47,7 @@ model files remain on disk when you upgrade.
 Install the Python dependencies with `python -m pip install -r backend/requirements.txt`.
 Run `npm ci` and `npm --prefix frontend ci` to install the Node dependencies,
 then run `npm run dev` to open Electron. Electron starts its Python sidecar. For inference in development,
-put a Kintsugi 27B compatible `llama-server` (Unsloth b12588-mix-c0c3de8 build,
-which supports the Inkling 2 looped-layer layout) on `PATH` or set
+put a `llama-server` (mainline b12633) on `PATH` or set
 `SIMPLD_LLAMA_SERVER` to the executable path.
 
 For browser-only development, run `npm run backend` and

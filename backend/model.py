@@ -77,7 +77,7 @@ class ModelManager:
                     executable = str(bundled)
             executable = executable or shutil.which("llama-server")
             if not executable or not Path(executable).is_file():
-                raise RuntimeError("Install a Kintsugi 27B compatible llama-server (Unsloth Inkling 2 build) or set SIMPLD_LLAMA_SERVER to its executable.")
+                raise RuntimeError("Install a llama-server or set SIMPLD_LLAMA_SERVER to its executable.")
             executable = str(Path(executable).resolve())
             path = await download.download_for_runtime(self.name)
             env = os.environ.copy()
@@ -96,6 +96,7 @@ class ModelManager:
                     executable, "--model", str(path.resolve()), "--host", "127.0.0.1",
                     "--port", str(port), "--api-key", key, "--ctx-size",
                     str(config.MODELS[self.name]["ctx"]), "--parallel", "1",
+                    "--cache-type-k", "q4_0", "--cache-type-v", "q4_0",
                     "--reasoning-format", "deepseek-legacy", "--reasoning-budget", "1024", "--no-webui",
                 ], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env)
@@ -118,7 +119,7 @@ class ModelManager:
             raise RuntimeError("llama-server exited during load. See llama-server.log in the model folder.")
         except Exception as exc:
             await self._close_runtime()
-            self.error = str(exc) or "Kintsugi 27B took too long to load."
+            self.error = str(exc) or "The model took too long to load."
             self.phase = Phase.FAILED
 
     async def tokens(self, messages: list[dict]):

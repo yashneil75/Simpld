@@ -5,20 +5,23 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
-// Kintsugi 27B uses the Inkling 2 looped-layer GGUF layout. Only Unsloth's
-// build supports it; upstream llama.cpp reads a different layout and emits
-// gibberish with these weights.
-const repo = 'unslothai/llama.cpp';
-const release = 'b12588-mix-c0c3de8';
+const repo = 'ggml-org/llama.cpp';
+const release = 'b12633';
 const target = process.argv[2] ?? ({
   darwin: 'macos-metal', win32: 'windows-vulkan', linux: 'linux-vulkan',
 })[process.platform];
 const assets = {
-  'windows-cuda': [`app-${release}-windows-x64-cuda12-portable.zip`],
-  'windows-vulkan': [`app-${release}-windows-x64-vulkan.zip`],
+  'windows-cuda': [
+    `llama-${release}-bin-win-cuda-12.4-x64.zip`,
+    'cudart-llama-bin-win-cuda-12.4-x64.zip',
+  ],
+  'windows-vulkan': [`llama-${release}-bin-win-vulkan-x64.zip`],
   'macos-metal': [`llama-${release}-bin-macos-${process.arch}.tar.gz`],
-  'linux-cuda': [`app-${release}-linux-x64-cuda12-portable.tar.gz`],
-  'linux-vulkan': [`app-${release}-linux-x64-vulkan.tar.gz`],
+  'linux-cuda': [
+    `llama-${release}-bin-ubuntu-cuda-12.8-x64.tar.gz`,
+    `cudart-llama-${release}-bin-ubuntu-cuda-12.8-x64.tar.gz`,
+  ],
+  'linux-vulkan': [`llama-${release}-bin-ubuntu-vulkan-x64.tar.gz`],
 }[target];
 
 if (!assets) throw new Error(`Unknown llama.cpp build: ${target}`);

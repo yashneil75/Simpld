@@ -24,10 +24,10 @@ class LibraryTest(unittest.TestCase):
     def test_catalogue_displays_exact_requested_artifact(self):
         self.assertEqual(list(config.MODELS), [MODEL])
         spec = config.MODELS[MODEL]
-        self.assertEqual(spec["repo"], "CaryPalmer/Kintsugi-27B")
-        self.assertEqual(spec["file"], "Kintsugi-27B-12G.gguf")
+        self.assertEqual(spec["repo"], "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF")
+        self.assertEqual(spec["file"], "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf")
         [entry] = download.library()
-        self.assertEqual(entry["label"], "Kintsugi 27B")
+        self.assertEqual(entry["label"], "Qwen 3.8 27B")
         self.assertFalse(entry["downloaded"])
 
     def test_discover_and_delete_nested_artifact(self):

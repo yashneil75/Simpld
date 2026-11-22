@@ -15,16 +15,15 @@ DEFAULT_MODEL = "Kintsugi-27b"
 
 MODELS = {
     DEFAULT_MODEL: {
-        "label": "Kintsugi 27B",
-        "repo": "CaryPalmer/Kintsugi-27B",
-        "file": "Kintsugi-27B-12G.gguf",
-        # TEMP: reduced to 5K (5120) for testing. Change back to 131072 (128K) when done.
-        "ctx": 5120,
-        "size_gb": 11.66,
-        "min_vram_gb": 16,
-        "min_ram_gb": 24,
-        "arch": "Inkling 2 (looped MoE)",
-        "quant": "UD-IQ3_XXS",
+        "label": "Qwen 3.8 27B",
+        "repo": "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF",
+        "file": "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf",
+        "ctx": 131072,
+        "size_gb": 10.44,
+        "min_vram_gb": 12,
+        "min_ram_gb": 12,
+        "arch": "Dense Transformer",
+        "quant": "Dynamic QAT",
         "description": "Local text chat and coding",
     },
 }
