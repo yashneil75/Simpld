@@ -24,7 +24,8 @@ npm run dist
 This builds the frontend, freezes the Python backend together with the installed
 `llama_cpp` package and its native libraries, and packages the app into `release/`.
 Install the GPU build of `llama-cpp-python` for your platform before building
-(see Dev below). Release builds use CUDA, Vulkan, or Metal wheels.
+(see Dev below). Release builds use CUDA or Vulkan wheels and build Metal from
+source. CUDA releases include the matching runtime and cuBLAS redistributables.
 
 - `Simpld-0.1.0-setup.exe` — installer (Start Menu shortcut, uninstaller)
 - `Simpld-0.1.0-portable.exe` — single file, runs anywhere
@@ -59,9 +60,16 @@ python -m pip install --only-binary=llama-cpp-python --extra-index-url https://a
 
 # Windows or Linux: NVIDIA CUDA 12.4
 python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 -r backend/requirements.txt
+python -m pip install -r backend/requirements-cuda.txt
+python scripts/prepare-cuda-runtime.py
 
-# Apple Silicon: Metal
-python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal -r backend/requirements.txt
+```
+
+On Apple Silicon, build Metal from source to avoid the upstream 0.3.36 wheel's
+invalid ZIP checksums (requires Xcode command line tools):
+
+```sh
+CMAKE_ARGS="-DGGML_METAL=ON -DGGML_NATIVE=OFF" python -m pip install --no-binary=llama-cpp-python -r backend/requirements.txt
 ```
 
 If replacing an existing CPU build, add `--force-reinstall --no-cache-dir`.

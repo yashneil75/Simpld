@@ -1,0 +1,3 @@
+# Redistributable libraries required by the cu124 llama-cpp-python wheels.
+nvidia-cuda-runtime-cu12==12.4.127
+nvidia-cublas-cu12==12.4.5.8
