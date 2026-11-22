@@ -1,6 +1,6 @@
 # Simpld Desktop
 
-Desktop chat app. React (Vite) frontend, Python (FastAPI + llama.cpp) backend,
+Desktop chat app. React (Vite) frontend, Python (FastAPI + llama-cpp-python) backend,
 Electron frameless shell.
 
 ```
@@ -21,34 +21,58 @@ Simpld-Desktop/
 npm run dist
 ```
 
-This builds the frontend, freezes the Python backend, downloads the mainline
-llama.cpp build b12633, and packages the app into `release/`.
+This builds the frontend, freezes the Python backend together with the installed
+`llama_cpp` package and its native libraries, and packages the app into `release/`.
+Install the GPU build of `llama-cpp-python` for your platform before building
+(see Dev below). Release builds use CUDA, Vulkan, or Metal wheels.
 
 - `Simpld-0.1.0-setup.exe` — installer (Start Menu shortcut, uninstaller)
 - `Simpld-0.1.0-portable.exe` — single file, runs anywhere
 
-Double-click either to open Simpld. The frozen backend and llama.cpp
-runtime stop when the app quits. Launching again focuses the existing window.
+Double-click either to open Simpld. The model runs inside the frozen Python
+backend and stops when the app quits. Launching again focuses the existing window.
 
-The installer includes the llama.cpp runtime. Open **Settings → Models** to
+The installer includes `llama-cpp-python`. Open **Settings → Models** to
 download **Qwen 3.8 27B** (IQ3_XXS, 10.44 GB). You can also run this command.
 
 ```
 python -m backend.download Kintsugi-27b
 ```
 
-Simpld uses a 131,072-token (128K) context for text chat with Q4 KV caching.
+Simpld uses a 128K context for text chat with Q4 KV caching.
+Reasoning streams into the **Show thinking** dropdown and is saved with the reply.
+The **Reasoning** selector beside the model offers Low, Medium, and Extra high
+and remembers your choice. It passes the model's native `reasoning_effort`
+(`low`, `medium`, `xhigh`) into the GGUF's own chat template. See the
+[official model documentation](https://huggingface.co/Qwen/Qwen3.8-27B).
 Weights and chats live in
 `%USERPROFILE%\.simpld` on Windows and `~/.simpld` on macOS and Linux. Existing
 model files remain on disk when you upgrade.
 
 ## Dev
 
-Install the Python dependencies with `python -m pip install -r backend/requirements.txt`.
+Use Python 3.11. Install Python dependencies with the GPU wheel index for your hardware:
+
+```powershell
+# Windows or Linux: Vulkan (AMD, Intel, or NVIDIA)
+python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan -r backend/requirements.txt
+
+# Windows or Linux: NVIDIA CUDA 12.4
+python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 -r backend/requirements.txt
+
+# Apple Silicon: Metal
+python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal -r backend/requirements.txt
+```
+
+If replacing an existing CPU build, add `--force-reinstall --no-cache-dir`.
+For CPU-only development, use `python -m pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu -r backend/requirements.txt`.
+The [upstream installation guide](https://github.com/abetlen/llama-cpp-python#installation)
+also covers compiling from source. Install `pyinstaller` to build the desktop bundle.
+
 Run `npm ci` and `npm --prefix frontend ci` to install the Node dependencies,
-then run `npm run dev` to open Electron. Electron starts its Python sidecar. For inference in development,
-put a `llama-server` (mainline b12633) on `PATH` or set
-`SIMPLD_LLAMA_SERVER` to the executable path.
+then run `npm run dev` to open Electron. Electron starts its Python sidecar.
+Inference loads the GGUF directly through `llama_cpp.Llama`, with GPU offload,
+flash attention, and Q4 KV caching on a dedicated worker thread.
 
 For browser-only development, run `npm run backend` and
 `npm run frontend:dev` in separate terminals.

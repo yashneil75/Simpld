@@ -20,7 +20,7 @@ import threading
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +80,7 @@ _conversation: int | None = store.newest(_project)
 class ChatRun:
     conversation: int | None
     messages: list[dict]
+    reasoning_level: str = "medium"
     finished: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -100,6 +101,7 @@ class DeleteProjectBody(BaseModel):
 class ChatBody(BaseModel):
     content: str
     revision: int | None = None
+    reasoning_level: Literal["low", "medium", "xhigh"] = "medium"
 
 
 class SelectModelBody(BaseModel):
@@ -143,7 +145,7 @@ def _begin_chat(body: ChatBody) -> ChatRun:
         if _conversation is None:
             _conversation = store.new_conversation(_project)
         store.append(_conversation, {"role": "user", "content": text})
-        _active_chat = ChatRun(_conversation, store.load(_conversation))
+        _active_chat = ChatRun(_conversation, store.load(_conversation), body.reasoning_level)
         return _active_chat
 
 
@@ -391,7 +393,7 @@ async def chat(body: ChatBody) -> dict:
     conversation = run.conversation
     parts = []
     try:
-        async with aclosing(manager.tokens(run.messages)) as tokens:
+        async with aclosing(manager.tokens(run.messages, reasoning_level=run.reasoning_level)) as tokens:
             async for token in tokens:
                 parts.append(token)
     except Exception as exc:
@@ -422,7 +424,7 @@ async def chat_stream(body: ChatBody):
         parts = []
         error = None
         try:
-            async with aclosing(manager.tokens(run.messages)) as tokens:
+            async with aclosing(manager.tokens(run.messages, reasoning_level=run.reasoning_level)) as tokens:
                 async for token in tokens:
                     parts.append(token)
                     yield f"data: {json.dumps({'token': token})}\n\n"
@@ -441,6 +443,9 @@ async def chat_stream(body: ChatBody):
 def main() -> None:
     import multiprocessing
 
+    # On Windows, initialize NumPy's native DLLs before the stdin watcher blocks
+    # in read(); importing them on the inference thread can otherwise stall.
+    import numpy
     import uvicorn
 
     multiprocessing.freeze_support()  # no-op unless frozen (PyInstaller on Windows)

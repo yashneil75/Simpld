@@ -36,7 +36,7 @@ class HistoryTest(unittest.IsolatedAsyncioTestCase):
     async def test_context_follows_the_persisted_conversation(self):
         seen = []
 
-        async def tokens(history):
+        async def tokens(history, **_options):
             seen.append([message["content"] for message in history])
             yield "reply"
 
@@ -65,7 +65,7 @@ class HistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["messages"], [])
 
     async def test_stream_close_saves_partial_and_releases_generation(self):
-        async def tokens(_history):
+        async def tokens(_history, **_options):
             yield "partial"
             await asyncio.Event().wait()
 
@@ -86,7 +86,7 @@ class HistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([msg["content"] for msg in snapshot["messages"]], ["prompt", "partial"])
 
     async def test_load_or_generation_errors_surface_over_sse(self):
-        async def tokens(_history):
+        async def tokens(_history, **_options):
             raise RuntimeError("load failed")
             yield
 
@@ -96,42 +96,41 @@ class HistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('data: {"error": "load failed"}', response.text)
         self.assertIsNone(backend._active_chat)
 
-    async def test_load_failure_is_retryable_with_one_worker(self):
+    async def test_reasoning_streams_and_is_saved_for_the_thinking_dropdown(self):
         runtime = ModelManager()
         self.addAsyncCleanup(runtime.close)
-        with patch.dict("os.environ", {"SIMPLD_LLAMA_SERVER": "missing-llama-server.exe"}):
-            self.assertEqual(runtime.load_in_background()["phase"], Phase.LOADING)
-            task = runtime._load_task
-            runtime.load_in_background()
-            self.assertIs(runtime._load_task, task)
-            await task
-            self.assertEqual(runtime.status()["phase"], Phase.FAILED)
-            self.assertIn("SIMPLD_LLAMA_SERVER", runtime.status()["error"])
-            self.assertEqual(runtime.load_in_background()["phase"], Phase.LOADING)
-            self.assertIsNot(runtime._load_task, task)
-            await runtime._load_task
 
-    async def test_runtime_consumes_chat_stream_and_skips_non_text_chunks(self):
-        def transport(request):
-            self.assertEqual(request.url.path, "/v1/chat/completions")
-            self.assertEqual(json.loads(request.content)["messages"], [
-                {"role": "user", "content": "prompt"},
-            ])
-            return httpx.Response(200, text=(
-                'data: {"choices": []}\n\n'
-                'data: {"choices": [{"delta": {"content": "reply"}}]}\n\n'
-                'data: [DONE]\n\n'
-            ))
+        def chunks(**_kwargs):
+            yield {"choices": [{"delta": {"content": "Working through it"}}]}
+            yield {"choices": [{"delta": {"content": "</think>"}}]}
+            yield {"choices": [{"delta": {"content": "The answer"}}]}
 
-        runtime = ModelManager()
+        runtime._llm = SimpleNamespace(create_chat_completion=chunks, close=lambda: None)
+        runtime._chat_handler = lambda **_kwargs: None
         runtime.phase = Phase.READY
-        runtime._process = SimpleNamespace(poll=lambda: None)
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(transport), base_url="http://127.0.0.1",
-        ) as client:
-            runtime._client = client
-            reply = [token async for token in runtime.tokens([
-                {"role": "tool", "content": "ignored"},
-                {"role": "user", "content": "prompt"},
-            ])]
-        self.assertEqual(reply, ["reply"])
+        with patch.object(backend, "manager", runtime):
+            response = await self.client.post("/api/chat/stream", json={"content": "prompt"})
+        tokens = [
+            json.loads(line[5:])["token"]
+            for line in response.text.splitlines()
+            if line.startswith("data:") and line != "data: [DONE]"
+        ]
+        self.assertEqual(tokens, ["<think>\nWorking through it", "</think>", "The answer"])
+        snapshot = (await self.client.get("/api/session")).json()
+        self.assertEqual(snapshot["messages"][-1]["content"], "".join(tokens))
+
+    async def test_reasoning_level_reaches_generation_and_rejects_invalid_values(self):
+        seen = []
+
+        async def tokens(_history, reasoning_level):
+            seen.append(reasoning_level)
+            yield "reply"
+
+        with patch.object(backend.manager, "tokens", tokens):
+            response = await self.client.post("/api/chat/stream", json={"content": "prompt", "reasoning_level": "xhigh"})
+            self.assertEqual(response.status_code, 200)
+            response = await self.client.post("/api/chat", json={"content": "prompt", "reasoning_level": "low"})
+            self.assertEqual(response.status_code, 200)
+            response = await self.client.post("/api/chat", json={"content": "prompt", "reasoning_level": "invalid"})
+            self.assertEqual(response.status_code, 422)
+        self.assertEqual(seen, ["xhigh", "low"])

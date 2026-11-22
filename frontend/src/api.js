@@ -63,11 +63,11 @@ export const api = {
  * POST to /api/chat/stream and invoke onToken for each SSE token.
  * Returns the full assembled reply. Abort via AbortController signal.
  */
-export async function streamChat(content, { onToken, signal, revision } = {}) {
+export async function streamChat(content, { onToken, signal, revision, reasoningLevel = 'medium' } = {}) {
   const res = await fetch(url('/api/chat/stream'), {
     method: 'POST',
     headers: { ...jsonHeaders(), Accept: 'text/event-stream' },
-    body: JSON.stringify({ content, revision }),
+    body: JSON.stringify({ content, revision, reasoning_level: reasoningLevel }),
     signal,
   });
   if (!res.ok) throw await responseError(res);

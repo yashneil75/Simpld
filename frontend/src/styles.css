@@ -630,6 +630,27 @@ button.foot-status:hover { background: var(--hover); color: var(--ink); }
   cursor: pointer;
 }
 
+.reasoning-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.reasoning-control select {
+  padding: 4px 20px 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  color-scheme: dark;
+}
+.reasoning-control select:hover { background: var(--hover); }
+.reasoning-control select:focus-visible { outline: 1px solid var(--ink-soft); }
+.reasoning-control select:disabled { opacity: .5; cursor: default; }
+
 .model-trigger[hidden] { display: none; }
 .model-trigger:hover { background: var(--hover); }
 .model-trigger svg { width: 12px; height: 12px; transition: transform .15s ease; }

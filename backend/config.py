@@ -13,12 +13,16 @@ PORT = int(os.environ.get("SIMPLD_PORT", "8000"))
 
 DEFAULT_MODEL = "Kintsugi-27b"
 
+# Native reasoning_effort values accepted by the GGUF's chat template.
+REASONING_LEVELS = ("low", "medium", "xhigh")
+
 MODELS = {
     DEFAULT_MODEL: {
         "label": "Qwen 3.8 27B",
         "repo": "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF",
         "file": "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf",
         "ctx": 131072,
+        "reasoning": True,  # The chat template opens <think> in the prompt.
         "size_gb": 10.44,
         "min_vram_gb": 12,
         "min_ram_gb": 12,

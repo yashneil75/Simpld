@@ -1,20 +1,15 @@
-"""Lifecycle and chat transport for the local llama.cpp server."""
+"""Local llama-cpp-python inference, serialized on a dedicated worker thread."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import secrets
-import shutil
-import socket
-import subprocess
-import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
-import httpx
+from anyio import CancelScope
 
 from backend import config, download
 
@@ -33,13 +28,12 @@ class ModelManager:
         self.phase = Phase.UNLOADED
         self.error: str | None = None
         self._load_task: asyncio.Task | None = None
-        self._process: subprocess.Popen | None = None
-        self._client: httpx.AsyncClient | None = None
+        self._llm = None
+        self._chat_handler = None
+        self._worker: ThreadPoolExecutor | None = None
+        self._runtime_lock = asyncio.Lock()
 
     def status(self) -> dict:
-        if self.phase == Phase.READY and self._process.poll() is not None:
-            self.phase = Phase.FAILED
-            self.error = "llama-server exited. See llama-server.log in the model folder."
         return {
             "current": self.name,
             "phase": self.phase,
@@ -54,105 +48,130 @@ class ModelManager:
         }
 
     def select(self, name: str) -> dict:
-        # The catalogue currently exposes one supported runtime configuration.
         if name != self.name:
             raise ValueError(f"Unknown model {name!r}. Available: {self.name}")
         return self.status()
 
     def load_in_background(self) -> dict:
-        self.status()
         if self.phase in {Phase.UNLOADED, Phase.FAILED}:
             self.phase, self.error = Phase.LOADING, None
             self._load_task = asyncio.create_task(self._load())
         return self.status()
 
+    async def _run(self, function, *args):
+        if self._worker is None:
+            self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="simpld-llama")
+        future = asyncio.get_running_loop().run_in_executor(self._worker, function, *args)
+        # Starlette cancels disconnected streams with an AnyIO cancel scope.
+        # Shield cleanup from repeated cancellation at each await as well.
+        with CancelScope(shield=True):
+            try:
+                return await asyncio.shield(future)
+            except asyncio.CancelledError:
+                # Native calls cannot be cancelled. Finish before releasing the
+                # lock so requests cannot use or free a context still in flight.
+                with suppress(Exception):
+                    await future
+                raise
+
+    def _open_runtime(self, path: Path) -> None:
+        from llama_cpp import GGML_TYPE_Q4_0, Llama
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+
+        self._llm = Llama(
+            model_path=str(path.resolve()),
+            n_ctx=config.MODELS[self.name]["ctx"],
+            n_gpu_layers=-1,
+            flash_attn=True,
+            type_k=GGML_TYPE_Q4_0,
+            type_v=GGML_TYPE_Q4_0,
+            swa_full=False,
+            verbose=False,
+        )
+        eos = self._llm.token_eos()
+        bos = self._llm.token_bos()
+        self._chat_handler = Jinja2ChatFormatter(
+            template=self._llm.metadata["tokenizer.chat_template"],
+            eos_token=self._llm.detokenize([eos], special=True).decode("utf-8") if eos >= 0 else "",
+            bos_token=self._llm.detokenize([bos], special=True).decode("utf-8") if bos >= 0 else "",
+            stop_token_ids=[eos] if eos >= 0 else [],
+        ).to_chat_handler()
+
+    def _close_runtime(self) -> None:
+        if self._llm is not None:
+            self._llm.close()
+            self._llm = None
+        self._chat_handler = None
+
     async def _load(self) -> None:
         try:
-            await self._close_runtime()
-            executable = os.environ.get("SIMPLD_LLAMA_SERVER")
-            if executable is None and getattr(sys, "frozen", False):
-                name = "llama-server.exe" if os.name == "nt" else "llama-server"
-                bundled = Path(sys.executable).parent / "llama" / name
-                if bundled.is_file():
-                    executable = str(bundled)
-            executable = executable or shutil.which("llama-server")
-            if not executable or not Path(executable).is_file():
-                raise RuntimeError("Install a llama-server or set SIMPLD_LLAMA_SERVER to its executable.")
-            executable = str(Path(executable).resolve())
             path = await download.download_for_runtime(self.name)
-            env = os.environ.copy()
-            if sys.platform.startswith("linux"):
-                libraries = [str(Path(executable).parent)]
-                original = env.pop("LD_LIBRARY_PATH_ORIG", None) if getattr(sys, "frozen", False) else env.get("LD_LIBRARY_PATH")
-                if original:
-                    libraries.append(original)
-                env["LD_LIBRARY_PATH"] = os.pathsep.join(libraries)
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = sock.getsockname()[1]
-            key = secrets.token_urlsafe(32)
-            with (config.MODEL_DIR / "llama-server.log").open("wb") as log:
-                self._process = subprocess.Popen([
-                    executable, "--model", str(path.resolve()), "--host", "127.0.0.1",
-                    "--port", str(port), "--api-key", key, "--ctx-size",
-                    str(config.MODELS[self.name]["ctx"]), "--parallel", "1",
-                    "--cache-type-k", "q4_0", "--cache-type-v", "q4_0",
-                    "--reasoning-format", "deepseek-legacy", "--reasoning-budget", "1024", "--no-webui",
-                ], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env)
-            self._client = httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}",
-                headers={"Authorization": f"Bearer {key}"},
-                timeout=httpx.Timeout(120, connect=2),
-                trust_env=False,
-            )
-            async with asyncio.timeout(300):
-                while self._process.poll() is None:
-                    try:
-                        response = await self._client.get("/health", timeout=2)
-                        if response.status_code == 200:
-                            self.phase = Phase.READY
-                            return
-                    except httpx.RequestError:
-                        pass
-                    await asyncio.sleep(0.25)
-            raise RuntimeError("llama-server exited during load. See llama-server.log in the model folder.")
+            async with self._runtime_lock:
+                await self._run(self._close_runtime)
+                await self._run(self._open_runtime, path)
+                self.phase = Phase.READY
+        except asyncio.CancelledError:
+            async with self._runtime_lock:
+                await self._run(self._close_runtime)
+            raise
         except Exception as exc:
-            await self._close_runtime()
-            self.error = str(exc) or "The model took too long to load."
+            async with self._runtime_lock:
+                await self._run(self._close_runtime)
+            self.error = str(exc) or "The model could not be loaded."
             self.phase = Phase.FAILED
 
-    async def tokens(self, messages: list[dict]):
+    async def tokens(self, messages: list[dict], reasoning_level: str = "medium"):
+        if reasoning_level not in config.REASONING_LEVELS:
+            raise ValueError("Unknown reasoning level.")
         self.load_in_background()
         if self.phase == Phase.LOADING:
             await asyncio.shield(self._load_task)
-        if self.phase != Phase.READY:
-            raise RuntimeError(self.error or "Model unavailable.")
         history = [
             {"role": message["role"], "content": message["content"]}
             for message in messages
             if message.get("role") in {"system", "user", "assistant"}
             and isinstance(message.get("content"), str)
         ]
-        async with self._client.stream("POST", "/v1/chat/completions", json={
-            "messages": history, "stream": True, "max_tokens": 4096,
-        }) as response:
-            if response.is_error:
-                await response.aread()
-                raise RuntimeError(response.text)
-            async for line in response.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    return
-                chunk = json.loads(payload)
-                if chunk.get("error"):
-                    raise RuntimeError(str(chunk["error"]))
-                for choice in chunk.get("choices", []):
-                    if token := choice.get("delta", {}).get("content"):
-                        yield token
-            raise RuntimeError("llama-server ended its response early.")
+        for message in history:
+            if message["role"] == "assistant" and message["content"].startswith("<think>"):
+                reasoning, separator, answer = message["content"][len("<think>"):].partition("</think>")
+                message["reasoning_content"] = reasoning.strip()
+                message["content"] = answer.lstrip() if separator else ""
+        async with self._runtime_lock:
+            if self.phase != Phase.READY:
+                raise RuntimeError(self.error or "Model unavailable.")
+            stream = None
+
+            def start_stream():
+                nonlocal stream
+                # create_chat_completion has no chat_template_kwargs parameter.
+                # Bind native template variables through its supported handler API.
+                self._llm.chat_handler = partial(
+                    self._chat_handler, reasoning_effort=reasoning_level,
+                    enable_thinking=True, preserve_thinking=True,
+                )
+                stream = self._llm.create_chat_completion(
+                    messages=history, stream=True, max_tokens=4096,
+                )
+
+            try:
+                await self._run(start_stream)
+                # The GGUF prompt opens <think> before generation starts. Put
+                # that marker back so the UI can stream reasoning in its toggle.
+                needs_think_marker = config.MODELS[self.name].get("reasoning", False)
+                # StopIteration cannot cross an asyncio Future boundary.
+                while (chunk := await self._run(next, stream, None)) is not None:
+                    if chunk.get("error"):
+                        raise RuntimeError(str(chunk["error"]))
+                    for choice in chunk.get("choices", []):
+                        if token := choice.get("delta", {}).get("content"):
+                            if needs_think_marker:
+                                token = "<think>\n" + token
+                                needs_think_marker = False
+                            yield token
+            finally:
+                if stream is not None:
+                    await self._run(stream.close)
 
     async def delete_weights(self, name: str) -> bool:
         self.select(name)
@@ -160,29 +179,24 @@ class ModelManager:
             raise RuntimeError("Wait for the model operation to finish before deleting it.")
         self.phase = Phase.UNLOADING
         try:
-            await self._close_runtime()
-            return download.delete(name)
+            async with self._runtime_lock:
+                await self._run(self._close_runtime)
+                return await asyncio.to_thread(download.delete, name)
         finally:
             self.phase, self.error = Phase.UNLOADED, None
 
     async def close(self) -> None:
+        self.phase = Phase.UNLOADING
         if self._load_task is not None:
             self._load_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._load_task
-        await self._close_runtime()
+            self._load_task = None
+        async with self._runtime_lock:
+            await self._run(self._close_runtime)
+            self._worker.shutdown(wait=True)
+            self._worker = None
         self.phase, self.error = Phase.UNLOADED, None
-
-    async def _close_runtime(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-        if self._process is not None:
-            if self._process.poll() is None:
-                with suppress(ProcessLookupError):
-                    self._process.kill()
-            await asyncio.to_thread(self._process.wait)
-            self._process = None
 
 
 manager = ModelManager()

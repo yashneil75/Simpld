@@ -41,6 +41,15 @@ export default function App() {
   const [menu, setMenu] = useState(null);
   const [settingsTab, setSettingsTab] = useState(null);
   const [input, setInput] = useState('');
+  const [reasoningLevel, setReasoningLevel] = useState(() => {
+    try {
+      const stored = localStorage.getItem('simpld.reasoningLevel');
+      const saved = stored === 'high' ? 'xhigh' : stored;
+      return ['low', 'medium', 'xhigh'].includes(saved) ? saved : 'medium';
+    } catch {
+      return 'medium';
+    }
+  });
   const [reply, dispatchReply] = useReducer(replyReducer, idle);
   const [navigating, setNavigating] = useState(false);
   const [error, setError] = useState('');
@@ -130,6 +139,7 @@ export default function App() {
 
     try {
       await streamChat(text, {
+        reasoningLevel,
         revision: session.revision,
         signal: controller.signal,
         onToken: (_token, assembled) => {
@@ -345,6 +355,24 @@ export default function App() {
                   <ModelMenu open={modelOpen} tiers={catalog.tiers} current={model.name} onSelect={selectModel} />
                 </div>
               )}
+              <label className="reasoning-control">
+                <span>Reasoning</span>
+                <select
+                  aria-label="Reasoning level"
+                  title="How thoroughly the model should reason before answering"
+                  value={reasoningLevel}
+                  disabled={reply.phase !== 'idle'}
+                  onChange={(event) => {
+                    const level = event.target.value;
+                    setReasoningLevel(level);
+                    try { localStorage.setItem('simpld.reasoningLevel', level); } catch { /* Storage may be unavailable. */ }
+                  }}
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="xhigh">Extra high</option>
+                </select>
+              </label>
             </div>
           </div>
         </div>
