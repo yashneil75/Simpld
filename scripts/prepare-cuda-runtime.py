@@ -1,4 +1,4 @@
-"""Place CUDA redistributables beside llama_cpp before testing and freezing."""
+"""Place CUDA redistributables beside llama_cpp before freezing."""
 
 from importlib.metadata import distribution
 import os
@@ -30,7 +30,7 @@ def main() -> None:
             raise RuntimeError(f"No runtime libraries found in {name}")
         print(f"{name}: {', '.join(copied)}")
 
-    # ELF dependencies need to find these libraries during CI imports and
+    # ELF dependencies need to find these libraries during
     # PyInstaller's dependency analysis. PyInstaller then bundles them itself.
     if sys.platform.startswith("linux") and (env_file := os.environ.get("GITHUB_ENV")):
         search = os.pathsep.join(filter(None, (str(target), os.environ.get("LD_LIBRARY_PATH"))))
