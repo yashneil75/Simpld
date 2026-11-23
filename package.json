@@ -74,6 +74,7 @@
     "portable": {}
   },
   "dependencies": {
-    "electron-updater": "^6.8.11"
+    "electron-updater": "^6.8.11",
+    "semver": "^7.8.6"
   }
 }
