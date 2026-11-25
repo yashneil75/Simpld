@@ -24,8 +24,9 @@ npm run dist
 This builds the frontend, freezes the Python backend together with the installed
 `llama_cpp` package and its native libraries, and packages the app into `release/`.
 Install the GPU build of `llama-cpp-python` for your platform before building
-(see Dev below). Release builds use CUDA or Vulkan wheels and build Metal from
-source. CUDA releases include the matching runtime and cuBLAS redistributables.
+(see Dev below). Release builds select the latest compatible CUDA 12.4, Vulkan,
+or Metal wheel from its upstream index. CUDA releases include the matching
+runtime and cuBLAS redistributables.
 
 - `Simpld-0.1.0-setup.exe` — installer (Start Menu shortcut, uninstaller)
 - `Simpld-0.1.0-portable.exe` — single file, runs anywhere
@@ -56,23 +57,25 @@ Use Python 3.11. Install Python dependencies with the GPU wheel index for your h
 
 ```powershell
 # Windows or Linux: Vulkan (AMD, Intel, or NVIDIA)
-python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan -r backend/requirements.txt
+python -m pip install --upgrade --no-deps --only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan -c backend/requirements.txt llama-cpp-python
+python -m pip install -r backend/requirements.txt
 
 # Windows or Linux: NVIDIA CUDA 12.4
-python -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 -r backend/requirements.txt
-python -m pip install -r backend/requirements-cuda.txt
+python -m pip install --upgrade --no-deps --only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 -c backend/requirements.txt llama-cpp-python
+python -m pip install -r backend/requirements.txt -r backend/requirements-cuda.txt
 python scripts/prepare-cuda-runtime.py
 
 ```
 
-On Apple Silicon, build Metal from source to avoid the upstream 0.3.36 wheel's
-invalid ZIP checksums (requires Xcode command line tools):
+On Apple Silicon, use the Metal wheel:
 
 ```sh
-CMAKE_ARGS="-DGGML_METAL=ON -DGGML_NATIVE=OFF" python -m pip install --no-binary=llama-cpp-python -r backend/requirements.txt
+python -m pip install --upgrade --no-deps --only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/metal -c backend/requirements.txt llama-cpp-python
+python -m pip install -r backend/requirements.txt
 ```
 
-If replacing an existing CPU build, add `--force-reinstall --no-cache-dir`.
+When switching backends in an existing environment, add `--force-reinstall --no-cache-dir`
+to the GPU wheel install command.
 For CPU-only development, use `python -m pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu -r backend/requirements.txt`.
 The [upstream installation guide](https://github.com/abetlen/llama-cpp-python#installation)
 also covers compiling from source. Install `pyinstaller` to build the desktop bundle.
