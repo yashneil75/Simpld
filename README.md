@@ -34,18 +34,18 @@ Double-click either to open Simpld. The model runs inside the frozen Python
 backend and stops when the app quits. Launching again focuses the existing window.
 
 The installer includes `llama-cpp-python`. Open **Settings → Models** to
-download **Qwen 3.8 27B** (IQ3_XXS, 10.44 GB). You can also run this command.
+download **Bonsai 2.5 27B** (Q2_0, ~7.67 GB). You can also run this command.
 
 ```
 python -m backend.download Kintsugi-27b
 ```
 
-Simpld uses a 128K context for text chat with Q4 KV caching.
+Simpld uses a 262K context for text chat with Q4 KV caching.
 Reasoning streams into the **Show thinking** dropdown and is saved with the reply.
 The **Reasoning** selector beside the model offers Low, Medium, and Extra high
 and remembers your choice. It passes the model's native `reasoning_effort`
 (`low`, `medium`, `xhigh`) into the GGUF's own chat template. See the
-[official model documentation](https://huggingface.co/Qwen/Qwen3.8-27B).
+[official model documentation](https://huggingface.co/prism-ml/Ternary-Bonsai-2.5-27B-GGUF).
 Weights and chats live in
 `%USERPROFILE%\.simpld` on Windows and `~/.simpld` on macOS and Linux. Existing
 model files remain on disk when you upgrade.

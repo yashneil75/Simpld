@@ -24,10 +24,10 @@ class LibraryTest(unittest.TestCase):
     def test_catalogue_displays_exact_requested_artifact(self):
         self.assertEqual(list(config.MODELS), [MODEL, "Ornith-1.5-9B"])
         spec = config.MODELS[MODEL]
-        self.assertEqual(spec["repo"], "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF")
-        self.assertEqual(spec["file"], "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf")
+        self.assertEqual(spec["repo"], "prism-ml/Ternary-Bonsai-2.5-27B-GGUF")
+        self.assertEqual(spec["file"], "Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf")
         entry, ornith = download.library()
-        self.assertEqual(entry["label"], "Qwen 3.8 27B")
+        self.assertEqual(entry["label"], "Bonsai 2.5 27B")
         self.assertFalse(entry["downloaded"])
         self.assertEqual(config.MODELS[ornith["id"]]["file"], "Ornith-1.5-9B-Q5_K_M.gguf")
         self.assertEqual(ornith["repo"], "ornith-ai/Ornith-1.5-9B-GGUF")
