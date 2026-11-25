@@ -41,7 +41,7 @@ download **Bonsai 2.5 27B** (Q2_0, ~7.67 GB). You can also run this command.
 python -m backend.download Kintsugi-27b
 ```
 
-Simpld uses a 262K context for text chat with Q4 KV caching.
+Simpld uses a 131K context for text chat with Q4 KV caching.
 Reasoning streams into the **Show thinking** dropdown and is saved with the reply.
 The **Reasoning** selector beside the model offers Low, Medium, and Extra high
 and remembers your choice. It passes the model's native `reasoning_effort`

@@ -21,7 +21,7 @@ MODELS = {
         "label": "Bonsai 2.5 27B",
         "repo": "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
         "file": "Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf",
-        "ctx": 262144,
+        "ctx": 131072,
         "reasoning": True,
         "size_gb": 7.67,
         "min_vram_gb": 8,
