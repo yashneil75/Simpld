@@ -14,20 +14,20 @@ PORT = int(os.environ.get("SIMPLD_PORT", "8000"))
 DEFAULT_MODEL = "Kintsugi-27b"
 
 # Native reasoning_effort values accepted by the GGUF's chat template.
-REASONING_LEVELS = ("low", "medium", "xhigh")
+REASONING_LEVELS = ("medium", "xhigh")
 
 MODELS = {
     DEFAULT_MODEL: {
-        "label": "Qwen 3.8 27B",
-        "repo": "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF",
-        "file": "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf",
+        "label": "Bonsai 2.5 27B",
+        "repo": "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
+        "file": "Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf",
         "ctx": 131072,
-        "reasoning": True,  # The chat template opens <think> in the prompt.
+        "reasoning": True,
         "size_gb": 10.44,
         "min_vram_gb": 12,
         "min_ram_gb": 12,
         "arch": "Dense Transformer",
-        "quant": "Dynamic QAT",
+        "quant": "Q2_0 Bonsai Special",
         "description": "Local text chat and coding",
     },
     "Ornith-1.5-9B": {
